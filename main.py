@@ -8,8 +8,7 @@ from astrbot.api import AstrBotConfig
 from astrbot.api import logger # 使用 AstrBot 的 logger
 from astrbot.api.event.filter import event_message_type, EventMessageType
 from astrbot.api.message_components import *
-from astrbot.api.message_components import Video, Text # 明确导入Text，虽然可能不是必须的
-
+from astrbot.api.message_components import Video
 # 正则表达式模式
 BILI_VIDEO_PATTERN = r"(https?:\/\/)?www\.bilibili\.com\/video\/(BV\w+|av\d+)\/?"
 
