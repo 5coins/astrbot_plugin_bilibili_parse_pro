@@ -1,132 +1,102 @@
-# main.py
-# -*- coding: utf-8 -*-
-
+import os
 import re
-import aiohttp
-from astrbot.api.event import filter, AstrMessageEvent
+import requests
+from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
+from astrbot.api import AstrBotConfig
 from astrbot.api import logger
 from astrbot.api.event.filter import event_message_type, EventMessageType
+from astrbot.api.message_components import *
+from astrbot.api.message_components import Video
 
-# 更稳健的 B 站视频链接识别（兼容结尾 / 或带参数）
-BILI_VIDEO_PATTERN = r"(https?://)?(?:www\.)?bilibili\.com/video/(BV\w+|av\d+)(?:/|\?|$)"
+# 正则表达式模式
+BILI_VIDEO_PATTERN = r"(https?:\/\/)?www\.bilibili\.com\/video\/(BV\w+|av\d+)\/?"
 
-
-@register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（含兜底）", "1.1.0")
+@register("bilibili_parse", "功德无量", "一个哔哩哔哩视频解析插件", "1.0.0")
 class Bilibili(Star):
     def __init__(self, context: Context):
         super().__init__(context)
 
-    # ---------- HTTP 工具 ----------
-    async def _http_get_json(self, url: str):
-        """异步 GET JSON"""
+    async def get(self, url):
+        """发送 GET 请求并返回响应"""
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=20) as resp:
-                    resp.raise_for_status()
-                    return await resp.json()
-        except Exception as e:
-            logger.error(f"[bilibili_parse] HTTP GET 失败: {e}")
+            response = requests.get(url)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException:
             return None
 
-    # ---------- 工具：文件大小格式化 ----------
     @staticmethod
-    def _fmt_size(raw) -> str:
-        try:
-            size = int(raw)
-        except Exception:
-            return "未知"
-        units = ["B", "KB", "MB", "GB", "TB"]
-        i = 0
-        while size >= 1024 and i < len(units) - 1:
+    def get_file_size(size_in_bytes):
+        """将字节转换为可读的文件大小格式"""
+        units = ['B', 'KB', 'MB', 'GB', 'TB']
+        index = 0
+        size = float(size_in_bytes or 0)
+        while size >= 1024 and index < len(units) - 1:
             size /= 1024
-            i += 1
-        return f"{size:.2f} {units[i]}"
+            index += 1
+        return f"{size:.2f} {units[index]}"
 
-    # ---------- 核心：取视频信息 ----------
-    async def get_video_info(self, bvid: str, accept_qn: int = 80):
-        """
-        通过你的代理 API 获取直链等信息。
-        注意：API 参数名为 bvid，这里直接传 BV 或 av(原样)；若后端仅支持 BV，请在后端转换或在此处补充转换。
-        """
-        api = f"http://114.134.188.188:3003/api?bvid={bvid}&accept={accept_qn}"
-        data = await self._http_get_json(api)
-        if not data:
-            return {"code": -1, "msg": "API 请求失败"}
-        if data.get("code") != 0 or not data.get("data"):
-            return {"code": -1, "msg": data.get("msg", "解析失败")}
+    async def get_video_info(self, bvid: str, accept: int):
+        """获取 Bilibili 视频信息，返回结构化结果"""
+        # 注意：accept 这里由你的后端服务决定，这里仍传 80（1080p）
+        try:
+            json_data = await self.get(f'http://114.134.188.188:3003/api?bvid={bvid}&accept=80')
+            if json_data is None or json_data.get('code') != 0:
+                return {'code': -1, 'msg': "解析失败，参数可能不正确"}
 
-        item = data["data"][0]
-        return {
-            "code": 0,
-            "title": data.get("title", "未知标题"),
-            "video_url": item.get("video_url", ""),
-            "pic": data.get("imgurl", ""),
-            "video_size": item.get("video_size", 0),
-            "quality": item.get("accept_format", "未知清晰度"),
-            "comment": item.get("comment", ""),
-        }
+            first = json_data['data'][0]
+            result = {
+                'code': 0,
+                'msg': '视频解析成功',
+                'title': json_data.get('title'),
+                'video_url': first.get('video_url'),
+                'pic': json_data.get('imgurl'),
+                'video_size': first.get('video_size'),
+                'quality': first.get('accept_format'),
+                'comment': first.get('comment')
+            }
+            return result
 
-    # ---------- 入口：匹配 B 站视频链接 ----------
+        except requests.RequestException as e:
+            return {'code': -1, 'msg': f"请求错误: {str(e)}"}
+        except Exception as e:
+            return {'code': -1, 'msg': f"解析失败: {str(e)}"}
+
     @filter.regex(BILI_VIDEO_PATTERN)
     @event_message_type(EventMessageType.ALL)
-    async def bilibili_parse(self, event: AstrMessageEvent):
-        """
-        解析 B 站视频并直接发送视频：
-        1) 优先用 Video.fromURL + event.chain_result 发送原生视频；
-        2) 若不支持，回退为 CQ:video；
-        3) 最后补发文字说明（避免平台不显示 caption）。
-        """
+    async def bilibili_parse(self, event):
+        """处理 Bilibili 视频解析请求：直接发送视频而不是图片"""
         try:
-            text = event.message_obj.message_str
-            m = re.search(BILI_VIDEO_PATTERN, text)
-            if not m:
+            url = event.message_obj.message_str
+            match = re.search(BILI_VIDEO_PATTERN, url)
+            if not match:
                 return
 
-            bvid = m.group(2)  # BV... 或 av123...
-            info = await self.get_video_info(bvid, 80)
-            if not info or info.get("code") != 0:
-                msg = info.get("msg", "解析失败") if info else "解析失败"
-                yield event.plain_result(f"解析B站视频失败：{msg}")
+            bvid = match.group(2)  # BV号或av号（你的后端接口需支持 BV）
+            accept_quality = 80     # 默认清晰度（你的后端固定传 80）
+
+            video_info = await self.get_video_info(bvid, accept_quality)
+
+            if not isinstance(video_info, dict) or video_info.get('code') != 0:
+                msg = video_info.get('msg') if isinstance(video_info, dict) else "解析失败"
+                yield event.plain_result(msg)
                 return
 
-            title = info["title"]
-            video_url = info["video_url"]
-            cover = info["pic"]
-            size_str = self._fmt_size(info.get("video_size", 0))
-            quality = info.get("quality", "未知清晰度")
-            comment = info.get("comment", "")
+            video_url = video_info['video_url']
+            title = video_info.get('title') or "Bilibili 视频"
+            size_human = self.get_file_size(video_info.get('video_size'))
+            quality = video_info.get('quality') or "未知"
 
-            # 说明文本（有的平台不显示 caption，所以单独补发一条）
-            caption = (
-                f"🎬 标题: {title}\n"
-                f"📦 大小: {size_str}\n"
-                f"👓 清晰度: {quality}\n"
-                f"💬 弹幕: {comment}\n"
-                f"🔗 直链: {video_url}"
-            )
+            # 先回一条简单文本（可选）
+            yield event.plain_result(f"🎬 标题: {title}\n👓 清晰度: {quality}\n📦 大小: {size_human}")
 
-            # 1) 尝试官方组件方式发送视频
-            try:
-                from astrbot.api.message_components import Video
-                video_comp = Video.fromURL(url=video_url)
+            # 核心：直接发送解析到的视频
+            # 若框架支持，最简方式：
+            yield event.video_result(video_url)
 
-                if hasattr(event, "chain_result"):
-                    yield event.chain_result([video_comp])
-                else:
-                    # 2) 适配器太老，回退 CQ 码视频
-                    cq = f"[CQ:video,file={video_url},cover={cover},title={title}]"
-                    yield event.plain_result(cq)
-
-            except Exception as send_err:
-                # 2) 组件失败，回退 CQ 码视频
-                logger.warning(f"[bilibili_parse] 组件方式发送失败，转用 CQ 码: {send_err}")
-                cq = f"[CQ:video,file={video_url},cover={cover},title={title}]"
-                yield event.plain_result(cq)
-
-            # 3) 补发文字说明
-            yield event.plain_result(caption)
+            # 如果你的运行环境不支持 video_result，可以改为用组件发送（备选）：
+            # yield event.message_result([Video(video_url)])
 
         except Exception as e:
-            logger.error(f"[bilibili_parse] 处理异常: {e}", exc_info=True)
-            yield event.plain_result(f"处理B站视频链接时发生错误: {e}")
+            yield event.plain_result(f"出错了：{e}")
