@@ -6,7 +6,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig
 from astrbot.api import logger
 from astrbot.api.event.filter import event_message_type, EventMessageType
-from astrbot.api.message_components import Video # 确保 Video 被正确导入
+# from astrbot.api.message_components import Video # 移除 Video 导入，因为不再直接使用 Video 组件
 
 # 正则表达式模式
 BILI_VIDEO_PATTERN = r"(https?:\/\/)?www\.bilibili\.com\/video\/(BV\w+|av\d+)\/?"
@@ -103,29 +103,24 @@ class Bilibili(Star):
             if video_info and video_info.get('code') == 0:
                 title = video_info['title']
                 video_url = video_info['video_url']
-                pic = video_info['pic']
+                pic = video_info['pic'] # 封面图，虽然不能直接发送视频，但可以作为链接提供
                 video_size_bytes = video_info['video_size']
                 quality = video_info['quality']
                 comment_url = video_info['comment']
 
                 formatted_video_size = self.get_file_size(video_size_bytes)
                 
-                caption = (
+                # --- 关键修改在这里：构建纯文本消息 ---
+                response_message = (
                     f"🎬 标题: {title}\n"
+                    f"🔗 视频链接: {video_url}\n" # 直接提供视频链接
+                    f"🖼 视频封面: {pic}\n" # 提供封面链接
                     f"📖 视频大小: {formatted_video_size}\n"
                     f"👓 清晰度: {quality}\n"
-                    f"🔗 视频链接: {video_url}\n"
                     f"💬 弹幕链接: {comment_url}"
                 )
                 
-                # --- 关键修改在这里 ---
-                # 使用 event.video_result() 方法
-                yield event.video_result(
-                    file=video_url,  # 视频文件或URL
-                    title=title,      # 视频标题
-                    cover_url=pic,    # 视频封面URL
-                    caption=caption   # 视频描述/附带文本
-                )
+                yield event.plain_result(response_message)
                 # --- 结束关键修改 ---
                 
             else:
