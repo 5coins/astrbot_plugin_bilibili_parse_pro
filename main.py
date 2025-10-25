@@ -7,7 +7,7 @@ from astrbot.api import AstrBotConfig
 from astrbot.api import logger
 from astrbot.api.event.filter import event_message_type, EventMessageType
 from astrbot.api.message_components import *
-from astrbot.api.message_components import Video # 移除 Text，因为它没有被使用且导致了之前的 ImportError
+from astrbot.api.message_components import Video # 确保 Video 被正确导入
 
 # 正则表达式模式
 BILI_VIDEO_PATTERN = r"(https?:\/\/)?www\.bilibili\.com\/video\/(BV\w+|av\d+)\/?"
@@ -36,7 +36,7 @@ class Bilibili(Star):
         """将字节转换为可读的文件大小格式"""
         units = ['B', 'KB', 'MB', 'GB', 'TB']
         index = 0
-        size = size_in_bytes # 确保这里 size 已经是整数
+        size = size_in_bytes 
 
         while size >= 1024 and index < len(units) - 1:
             size /= 1024
@@ -60,14 +60,12 @@ class Bilibili(Star):
 
             video_data = json_data['data'][0]
             
-            # --- 关键修改在这里：将 video_size 转换为整数 ---
             raw_video_size = video_data.get('video_size', 0)
             try:
                 video_size_int = int(raw_video_size)
             except (ValueError, TypeError):
                 logger.warning(f"Bilibili插件: 无法将视频大小 '{raw_video_size}' 转换为整数，默认为0。")
                 video_size_int = 0
-            # --- 结束关键修改 ---
 
             result = {
                 'code': 0,
@@ -75,7 +73,7 @@ class Bilibili(Star):
                 'title': json_data.get('title', '未知标题'),
                 'video_url': video_data.get('video_url', ''),
                 'pic': json_data.get('imgurl', ''), # 封面图
-                'video_size': video_size_int, # 使用转换后的整数
+                'video_size': video_size_int, 
                 'quality': video_data.get('accept_format', '未知清晰度'),
                 'comment': video_data.get('comment', '') # 弹幕链接
             }
@@ -107,7 +105,7 @@ class Bilibili(Star):
                 title = video_info['title']
                 video_url = video_info['video_url']
                 pic = video_info['pic']
-                video_size_bytes = video_info['video_size'] # 这里确保已经是整数
+                video_size_bytes = video_info['video_size']
                 quality = video_info['quality']
                 comment_url = video_info['comment']
 
@@ -121,12 +119,14 @@ class Bilibili(Star):
                     f"💬 弹幕链接: {comment_url}"
                 )
                 
+                # --- 关键修改在这里 ---
                 video_component = Video(
-                    url=video_url,
+                    file=video_url, # 将视频URL作为 'file' 参数传递
                     title=title,
                     cover_url=pic,
                     caption=caption
                 )
+                # --- 结束关键修改 ---
                 
                 yield event.message_components_result([video_component])
             else:
