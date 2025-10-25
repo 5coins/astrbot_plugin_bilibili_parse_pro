@@ -6,7 +6,6 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig
 from astrbot.api import logger
 from astrbot.api.event.filter import event_message_type, EventMessageType
-from astrbot.api.message_components import *
 from astrbot.api.message_components import Video # 确保 Video 被正确导入
 
 # 正则表达式模式
@@ -120,15 +119,15 @@ class Bilibili(Star):
                 )
                 
                 # --- 关键修改在这里 ---
-                video_component = Video(
-                    file=video_url, # 将视频URL作为 'file' 参数传递
-                    title=title,
-                    cover_url=pic,
-                    caption=caption
+                # 使用 event.video_result() 方法
+                yield event.video_result(
+                    file=video_url,  # 视频文件或URL
+                    title=title,      # 视频标题
+                    cover_url=pic,    # 视频封面URL
+                    caption=caption   # 视频描述/附带文本
                 )
                 # --- 结束关键修改 ---
                 
-                yield event.message_components_result([video_component])
             else:
                 error_msg = video_info.get('msg', '未知解析错误') if video_info else '获取视频信息失败'
                 logger.error(f"Bilibili插件 解析视频失败: {error_msg}")
