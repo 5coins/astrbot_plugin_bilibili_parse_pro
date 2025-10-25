@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import re
+import json
 import aiohttp
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -13,6 +14,7 @@ from astrbot.api.event.filter import event_message_type, EventMessageType
 #     https://b23.tv/vg9xOFG
 BILI_LINK_PATTERN = r"(https?://)?(?:www\.)?(?:bilibili\.com/video/(BV\w+|av\d+)(?:/|\?|$)|b23\.tv/[A-Za-z0-9_-]+)"
 
+CARD_LIKE_TYPES = {"json", "xml", "card", "app", "ark", "rich", "share"}
 
 @register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（含b23短链兜底）", "1.2.0")
 class Bilibili(Star):
@@ -55,6 +57,64 @@ class Bilibili(Star):
             size /= 1024
             i += 1
         return f"{size:.2f} {units[i]}"
+
+    # ---------- 工具：安全 JSON 序列化 ----------
+    @staticmethod
+    def _json_default(obj):
+        try:
+            return obj.__dict__
+        except Exception:
+            try:
+                return str(obj)
+            except Exception:
+                return "<unserializable>"
+
+    @staticmethod
+    def _segment_to_dict(seg):
+        """
+        将消息片段统一为 {type, data, repr} 的可序列化结构，尽量不丢信息。
+        兼容 dict / 具有 to_dict / 具有 __dict__ 的对象。
+        """
+        # 原本就是 dict
+        if isinstance(seg, dict):
+            t = (seg.get("type") or seg.get("_type") or "unknown")
+            return {
+                "type": str(t),
+                "data": {k: v for k, v in seg.items() if k not in {"type", "_type"}},
+            }
+
+        # 组件自带 to_dict
+        to_dict = getattr(seg, "to_dict", None)
+        if callable(to_dict):
+            try:
+                d = to_dict()
+                if isinstance(d, dict):
+                    t = d.get("type") or d.get("_type") or type(seg).__name__
+                    return {
+                        "type": str(t),
+                        "data": {k: v for k, v in d.items() if k not in {"type", "_type"}},
+                    }
+            except Exception:
+                pass
+
+        # 兜底：读常见属性
+        t = getattr(seg, "type", None) or getattr(seg, "_type", None) or type(seg).__name__
+        data = {}
+        for key in ("data", "attrs", "payload", "content", "extra"):
+            if hasattr(seg, key):
+                try:
+                    data[key] = getattr(seg, key)
+                except Exception:
+                    pass
+
+        # 再兜底：塞进 __dict__
+        try:
+            if not data:
+                data = getattr(seg, "__dict__", {})
+        except Exception:
+            data = {}
+
+        return {"type": str(t), "data": data, "repr": repr(seg)}
 
     # ---------- 核心：取视频信息 ----------
     async def get_video_info(self, bvid: str, accept_qn: int = 80):
@@ -161,3 +221,88 @@ class Bilibili(Star):
         except Exception as e:
             logger.error(f"[bilibili_parse] 处理异常: {e}", exc_info=True)
             yield event.plain_result(f"处理B站视频链接时发生错误: {e}")
+
+    # ---------- 新增：消息 dump 接收器 ----------
+    @filter.regex(r".*", flags=0)  # 尽量匹配所有文本（包含空串）
+    @event_message_type(EventMessageType.ALL)
+    async def dump_any_message(self, event: AstrMessageEvent):
+        """
+        功能：
+        - 将所有消息的结构规范化后写入日志，便于后台分析；
+        - 当检测到疑似卡片/富文本时，直接回显精简 JSON（超长自动截断）；
+        - 若文本以 '#dump' 开头，则无条件回显本次消息的结构（不论是否卡片）。
+        """
+        try:
+            msg_obj = getattr(event, "message_obj", None)
+            if not msg_obj:
+                return
+
+            message_str = getattr(msg_obj, "message_str", "") or ""
+            chain = getattr(msg_obj, "message_chain", None)
+            # 统一成 list
+            if chain is None:
+                chain = []
+
+            norm_chain = []
+            try:
+                for seg in chain:
+                    norm_chain.append(self._segment_to_dict(seg))
+            except Exception as seg_err:
+                logger.warning(f"[dump] 规范化消息片段失败: {seg_err}")
+
+            raw = {
+                "meta": {
+                    "platform": getattr(getattr(event, "adapter", None), "platform", None),
+                    "message_id": getattr(msg_obj, "message_id", None),
+                    "user_id": getattr(msg_obj, "user_id", None) or getattr(msg_obj, "sender_id", None),
+                    "group_id": getattr(msg_obj, "group_id", None) or getattr(msg_obj, "channel_id", None),
+                    "room_id": getattr(msg_obj, "room_id", None),
+                },
+                "message_str": message_str,
+                "message_chain": norm_chain,
+                "extra": getattr(msg_obj, "extra", None),
+                "raw_event": getattr(event, "raw_event", None),
+            }
+
+            # 后台日志：完整但不过分冗长
+            try:
+                logger.info("[dump] 收到消息结构: " + json.dumps(raw, ensure_ascii=False, default=self._json_default)[:16000])
+            except Exception as log_err:
+                logger.warning(f"[dump] 打印日志失败: {log_err}")
+
+            # 检测是否是疑似卡片/富文本
+            def _looks_like_card(seg: dict) -> bool:
+                t = str(seg.get("type", "")).lower()
+                if any(k in t for k in CARD_LIKE_TYPES):
+                    return True
+                # 次级特征：data 里包含明显的 json/xml 字段
+                data = seg.get("data") or {}
+                if isinstance(data, dict):
+                    # 常见键名探测
+                    keys = "json xml app template config meta payload data content"
+                    for k in keys.split():
+                        if k in data:
+                            return True
+                return False
+
+            has_card = any(_looks_like_card(s) for s in norm_chain)
+
+            # 手动命令：#dump
+            manual_dump = message_str.strip().lower().startswith("#dump")
+
+            # 仅在卡片或手动 dump 时回显，避免刷屏
+            if has_card or manual_dump:
+                text = json.dumps(raw, ensure_ascii=False, indent=2, default=self._json_default)
+                limit = 3800  # 避免超过平台消息长度
+                suffix = ""
+                if len(text) > limit:
+                    text = text[:limit]
+                    suffix = "\n...（已截断，完整请看后台日志）"
+                title = "收到卡片/富文本消息，原始结构如下：" if has_card else "手动 #dump：本次消息结构如下："
+                yield event.plain_result(f"{title}\n```json\n{text}\n```{suffix}")
+
+        except Exception as e:
+            logger.error(f"[dump] 处理异常: {e}", exc_info=True)
+            # 为了安全，dump 出错默认不回显，避免循环触发
+            # 如需提示，可解除下一行注释：
+            # yield event.plain_result(f"dump 消息时发生错误: {e}")
