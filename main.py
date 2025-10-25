@@ -3,74 +3,33 @@
 
 import re
 import aiohttp
-from urllib.parse import urlparse
-
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.event.filter import event_message_type, EventMessageType
 
-# 触发规则：同时匹配 bilibili.com/m.bilibili.com 的视频页 & b23 短链
-TRIGGER_PATTERN = (
-    r"(https?://)?(?:www\.)?(?:m\.)?bilibili\.com/video/(?:BV[a-zA-Z0-9]+|av\d+)"
-    r"|"
-    r"(https?://)?(?:b23\.tv|b23\.wtf|bili2233\.cn)/[A-Za-z0-9]+"
-)
-
-# 在正文里抓 URL 的通用正则（尽量耐受中文标点/括号包裹）
-URL_GRABBER = r"https?://[^\s\]\)\}<>【】）>]+"
-
-# 你自己的解析 API
-API_TEMPLATE = "http://114.134.188.188:3003/api?bvid={bvid}&accept={qn}"
+# 更稳健的 B 站视频链接识别（兼容结尾 / 或带参数）
+BILI_VIDEO_PATTERN = r"(https?://)?(?:www\.)?bilibili\.com/video/(BV\w+|av\d+)(?:/|\?|$)"
 
 
-@register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（含短链+兜底）", "1.2.0")
+@register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（含兜底）", "1.1.0")
 class Bilibili(Star):
     def __init__(self, context: Context):
         super().__init__(context)
 
-    # -------- 网络工具 --------
+    # ---------- HTTP 工具 ----------
     async def _http_get_json(self, url: str):
-        headers = {"User-Agent": "Mozilla/5.0"}
+        """异步 GET JSON"""
         try:
-            async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.get(url, timeout=25) as resp:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=20) as resp:
                     resp.raise_for_status()
                     return await resp.json()
         except Exception as e:
-            logger.error(f"[bilibili_parse] GET JSON 失败: {e}")
+            logger.error(f"[bilibili_parse] HTTP GET 失败: {e}")
             return None
 
-    async def _get_final_url(self, url: str) -> str | None:
-        """跟随重定向拿到最终 URL（用于 b23.tv 短链展开）"""
-        headers = {"User-Agent": "Mozilla/5.0"}
-        try:
-            async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.get(url, timeout=20, allow_redirects=True) as resp:
-                    # aiohttp 最终地址
-                    return str(resp.url)
-        except Exception as e:
-            logger.warning(f"[bilibili_parse] 短链展开失败: {e}")
-            return None
-
-    # -------- 文本&URL 工具 --------
-    @staticmethod
-    def _sanitize_url(u: str) -> str:
-        # 去除末尾可能的中文/英文括号和句读
-        trailing = ")]}>）】。，、!！?？\"'“”"
-        return u.rstrip(trailing)
-
-    @staticmethod
-    def _extract_urls(text: str) -> list[str]:
-        return [m.group(0) for m in re.finditer(URL_GRABBER, text)]
-
-    @staticmethod
-    def _parse_bvid_from_url(url: str) -> str | None:
-        # 从标准视频页提取 BV/av
-        m = re.search(r"/video/(BV[a-zA-Z0-9]+|av\d+)", url)
-        return m.group(1) if m else None
-
-    # -------- 格式化 --------
+    # ---------- 工具：文件大小格式化 ----------
     @staticmethod
     def _fmt_size(raw) -> str:
         try:
@@ -84,9 +43,13 @@ class Bilibili(Star):
             i += 1
         return f"{size:.2f} {units[i]}"
 
-    # -------- 业务：取视频信息 --------
+    # ---------- 核心：取视频信息 ----------
     async def get_video_info(self, bvid: str, accept_qn: int = 80):
-        api = API_TEMPLATE.format(bvid=bvid, qn=accept_qn)
+        """
+        通过你的代理 API 获取直链等信息。
+        注意：API 参数名为 bvid，这里直接传 BV 或 av(原样)；若后端仅支持 BV，请在后端转换或在此处补充转换。
+        """
+        api = f"http://114.134.188.188:3003/api?bvid={bvid}&accept={accept_qn}"
         data = await self._http_get_json(api)
         if not data:
             return {"code": -1, "msg": "API 请求失败"}
@@ -104,48 +67,23 @@ class Bilibili(Star):
             "comment": item.get("comment", ""),
         }
 
-    # -------- 入口：识别 & 发送 --------
-    @filter.regex(TRIGGER_PATTERN)
+    # ---------- 入口：匹配 B 站视频链接 ----------
+    @filter.regex(BILI_VIDEO_PATTERN)
     @event_message_type(EventMessageType.ALL)
     async def bilibili_parse(self, event: AstrMessageEvent):
         """
-        支持：
-        - 文案包裹/中文括号
-        - b23.tv 短链自动展开
-        - bilibili.com / m.bilibili.com 视频页
-        - 组件方式发视频；失败回退 CQ:video；再补文字说明
+        解析 B 站视频并直接发送视频：
+        1) 优先用 Video.fromURL + event.chain_result 发送原生视频；
+        2) 若不支持，回退为 CQ:video；
+        3) 最后补发文字说明（避免平台不显示 caption）。
         """
         try:
             text = event.message_obj.message_str
-
-            # 1) 从整段文本抓出所有 URL
-            urls = [self._sanitize_url(u) for u in self._extract_urls(text)]
-            if not urls:
-                return  # 没 URL，忽略
-
-            bvid = None
-            final_video_page = None
-
-            # 2) 逐个 URL 判断：若是短链先展开，否则直接解析 BV/av
-            for u in urls:
-                host = urlparse(u).netloc.lower()
-                if any(x in host for x in ["b23.tv", "b23.wtf", "bili2233.cn"]):
-                    expanded = await self._get_final_url(u)
-                    if expanded:
-                        bvid = self._parse_bvid_from_url(expanded)
-                        final_video_page = expanded
-                else:
-                    bvid = self._parse_bvid_from_url(u)
-                    final_video_page = u
-
-                if bvid:  # 找到就停
-                    break
-
-            if not bvid:
-                yield event.plain_result("没识别到 B 站视频链接（短链可能失效或非视频页）。请直接发送视频页链接或有效短链。")
+            m = re.search(BILI_VIDEO_PATTERN, text)
+            if not m:
                 return
 
-            # 3) 拉取直链
+            bvid = m.group(2)  # BV... 或 av123...
             info = await self.get_video_info(bvid, 80)
             if not info or info.get("code") != 0:
                 msg = info.get("msg", "解析失败") if info else "解析失败"
@@ -159,32 +97,34 @@ class Bilibili(Star):
             quality = info.get("quality", "未知清晰度")
             comment = info.get("comment", "")
 
+            # 说明文本（有的平台不显示 caption，所以单独补发一条）
             caption = (
                 f"🎬 标题: {title}\n"
-                f"📦 大小: {size_str}\n"
-                f"👓 清晰度: {quality}\n"
-                f"💬 弹幕: {comment}\n"
-                f"🔗 页面: {final_video_page or '未知'}\n"
-                f"🔗 直链: {video_url}"
+                # f"📦 大小: {size_str}\n"
+                # f"👓 清晰度: {quality}\n"
+                # f"💬 弹幕: {comment}\n"
+                # f"🔗 直链: {video_url}"
             )
 
-            # 4) 优先用组件方式发视频；失败回退 CQ 码；最后补发说明文字
+            # 1) 尝试官方组件方式发送视频
             try:
                 from astrbot.api.message_components import Video
-                comp = Video.fromURL(url=video_url)
+                video_comp = Video.fromURL(url=video_url)
 
                 if hasattr(event, "chain_result"):
-                    yield event.chain_result([comp])
+                    yield event.chain_result([video_comp])
                 else:
+                    # 2) 适配器太老，回退 CQ 码视频
                     cq = f"[CQ:video,file={video_url},cover={cover},title={title}]"
                     yield event.plain_result(cq)
 
             except Exception as send_err:
+                # 2) 组件失败，回退 CQ 码视频
                 logger.warning(f"[bilibili_parse] 组件方式发送失败，转用 CQ 码: {send_err}")
                 cq = f"[CQ:video,file={video_url},cover={cover},title={title}]"
                 yield event.plain_result(cq)
 
-            # 补发文本说明（避免某些平台不显示 caption）
+            # 3) 补发文字说明
             yield event.plain_result(caption)
 
         except Exception as e:
