@@ -102,8 +102,8 @@ class Bilibili(Star):
                 f"🎬 标题: {title}\n"
                 f"📦 大小: {size_str}\n"
                 f"👓 清晰度: {quality}\n"
-                f"💬 弹幕: {comment}\n"
-                f"🔗 直链: {video_url}"
+                # f"💬 弹幕: {comment}\n"
+                # f"🔗 直链: {video_url}"
             )
 
             # 1) 尝试官方组件方式发送视频
