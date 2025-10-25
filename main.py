@@ -2,30 +2,29 @@
 # -*- coding: utf-8 -*-
 
 import re
+from urllib.parse import urlparse
 import aiohttp
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.event.filter import event_message_type, EventMessageType
 
-# 触发：支持 b23.tv 短链 & bilibili.com/video 链接（消息里带文案也能匹配）
-BILI_TRIGGER_PATTERN = (
-    r"(?:https?://)?(?:www\.)?bilibili\.com/video/(?:BV\w+|av\d+)(?:[/?#].*)?"
-    r"|https?://b23\.tv/[A-Za-z0-9]+"
-)
+# ---- 触发 & 提取用的正则 ----
+# 触发器：只要文本里出现 bilibili.com 或 b23.tv 就触发
+TRIGGER_RE = r"(?:bilibili\.com|b23\.tv)"
 
-# 提取 BV/av 的正则
-BVID_IN_URL = re.compile(r"/video/(BV\w+|av\d+)", re.I)
-BVID_BARE = re.compile(r"\b(BV[0-9A-Za-z]{10,})\b")  # 文本里裸 BV 码（可选）
+# 文本中提取 URL
+URL_RE = r"https?://[^\s]+"
 
+# 从最终链接里提取 BV/av
+BILI_VIDEO_URL_RE = r"(?:https?://)?(?:www\.|m\.)?bilibili\.com/video/(BV\w+|av\d+)"
 
-@register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（b23短链与文案友好）", "1.2.0")
+@register("bilibili_parse", "功德无量", "B站视频解析并直接发送（支持b23短链与带文案）", "1.2.0")
 class Bilibili(Star):
     def __init__(self, context: Context):
         super().__init__(context)
 
-    # ========== HTTP ==========
-
+    # ---------- HTTP 工具 ----------
     async def _http_get_json(self, url: str):
         try:
             async with aiohttp.ClientSession() as session:
@@ -33,36 +32,26 @@ class Bilibili(Star):
                     resp.raise_for_status()
                     return await resp.json()
         except Exception as e:
-            logger.error(f"[bilibili_parse] HTTP GET 失败: {e}")
+            logger.error(f"[bilibili_parse] HTTP GET JSON失败: {e}")
             return None
 
-    async def _resolve_b23(self, url: str) -> str | None:
-        """解析 b23.tv 短链到最终跳转后的URL（通常是 bilibili.com/video/...）"""
+    async def _follow_redirect(self, url: str) -> str:
+        """跟随短链重定向，返回最终URL（用于 b23.tv）"""
         try:
             async with aiohttp.ClientSession() as session:
-                # 先尝试不跟随跳转拿 Location
-                async with session.get(url, allow_redirects=False, timeout=15) as resp:
-                    # 30x 才会带 Location
-                    if 300 <= resp.status < 400:
-                        loc = resp.headers.get("Location")
-                        if loc:
-                            return loc
-                # 兜底：跟随跳转，直接取最终URL
-                async with session.get(url, allow_redirects=True, timeout=20) as resp2:
-                    return str(resp2.url)
+                # 只需要拿最终URL，不关心正文
+                async with session.get(url, timeout=20, allow_redirects=True) as resp:
+                    return str(resp.url)
         except Exception as e:
-            logger.warning(f"[bilibili_parse] 解析 b23 短链失败: {e}")
-            return None
+            logger.warning(f"[bilibili_parse] 短链跳转失败: {url} -> {e}")
+            return url  # 失败就用原始URL
 
-    # ========== 工具 ==========
-
+    # ---------- 工具：文件大小格式化 ----------
     @staticmethod
     def _fmt_size(raw) -> str:
         try:
             size = int(raw)
         except Exception:
-            return "未知"
-        if size <= 0:
             return "未知"
         units = ["B", "KB", "MB", "GB", "TB"]
         i = 0
@@ -71,36 +60,12 @@ class Bilibili(Star):
             i += 1
         return f"{size:.2f} {units[i]}"
 
-    async def _extract_bvid(self, text: str) -> str | None:
-        """
-        从任意带文案的文本中提取 BV/av：
-        1) 先找 bilibili.com/video/... 里的 BV/av
-        2) 再找 b23.tv/xxxx，解析跳转后再取 BV/av
-        3) 兜底：文本里裸 BV 码
-        """
-        # 1) 直接在文本里找 bilibili.com/video 的 BV/av
-        m_url = BVID_IN_URL.search(text)
-        if m_url:
-            return m_url.group(1)
-
-        # 2) 查找 b23.tv 短链并解析
-        m_b23 = re.search(r"https?://b23\.tv/[A-Za-z0-9]+", text)
-        if m_b23:
-            final_url = await self._resolve_b23(m_b23.group(0))
-            if final_url:
-                m_url2 = BVID_IN_URL.search(final_url)
-                if m_url2:
-                    return m_url2.group(1)
-
-        # 3) 文本裸 BV 码（有时用户直接贴 BVxxxx）
-        m_bare = BVID_BARE.search(text)
-        if m_bare:
-            return m_bare.group(1)
-
-        return None
-
+    # ---------- 核心：取视频信息 ----------
     async def get_video_info(self, bvid: str, accept_qn: int = 80):
-        """调用你的代理 API 获取直链等信息"""
+        """
+        通过你的代理 API 获取直链等信息。
+        注意：如果后端只支持 BV，请确保传的是 BV；如果支持 av 也可原样传。
+        """
         api = f"http://114.134.188.188:3003/api?bvid={bvid}&accept={accept_qn}"
         data = await self._http_get_json(api)
         if not data:
@@ -109,6 +74,7 @@ class Bilibili(Star):
             return {"code": -1, "msg": data.get("msg", "解析失败")}
 
         item = data["data"][0]
+        # video_size 可能为字符串，这里不在此处转换，展示时再格式化
         return {
             "code": 0,
             "title": data.get("title", "未知标题"),
@@ -119,20 +85,49 @@ class Bilibili(Star):
             "comment": item.get("comment", ""),
         }
 
-    # ========== 入口 ==========
+    # ---------- 从文本中找出可用的 bvid ----------
+    async def _extract_bvid_from_text(self, text: str) -> str | None:
+        """从任意文案中提取URL，处理b23短链，返回 BV... 或 av..."""
+        urls = re.findall(URL_RE, text)
+        if not urls:
+            return None
 
-    @filter.regex(BILI_TRIGGER_PATTERN)
+        for u in urls:
+            try:
+                host = urlparse(u).hostname or ""
+            except Exception:
+                host = ""
+
+            final_url = u
+            # b23.tv 短链：需要跟随重定向拿最终链接
+            if "b23.tv" in host:
+                final_url = await self._follow_redirect(u)
+
+            # 在最终URL中提取 bvid
+            m = re.search(BILI_VIDEO_URL_RE, final_url)
+            if m:
+                return m.group(1)  # BV... 或 av...
+
+        return None
+
+    # ---------- 入口：匹配包含 bilibili/b23 的消息 ----------
+    @filter.regex(TRIGGER_RE)
     @event_message_type(EventMessageType.ALL)
     async def bilibili_parse(self, event: AstrMessageEvent):
         """
-        支持：b23短链 + 文案、PC/移动端链接、裸BV码
-        发送：优先原生视频；失败自动回退 CQ:video；补发说明文字
+        解析 B 站视频并直接发送：
+        1) 文本里自动找URL；b23.tv自动跳转到最终链接；
+        2) 提取 BV/av -> 调用解析API；
+        3) 优先用 Video.fromURL + chain_result 发送；
+           不支持则回退 CQ:video；
+        4) 补发文字说明（避免平台不显示 caption）。
         """
         try:
             text = event.message_obj.message_str
-            bvid = await self._extract_bvid(text)
+
+            bvid = await self._extract_bvid_from_text(text)
             if not bvid:
-                yield event.plain_result("没有识别到有效的 B站视频链接（已支持 b23 短链与带文案）。")
+                yield event.plain_result("没有在这条消息里找到可解析的B站视频链接哦～")
                 return
 
             info = await self.get_video_info(bvid, 80)
@@ -156,22 +151,25 @@ class Bilibili(Star):
                 f"🔗 直链: {video_url}"
             )
 
-            # 优先：组件方式发送视频
+            # 1) 尝试官方组件发送视频（多数适配器支持）
             try:
                 from astrbot.api.message_components import Video
-                video_comp = Video.fromURL(url=video_url)
+                comp = Video.fromURL(url=video_url)
+
                 if hasattr(event, "chain_result"):
-                    yield event.chain_result([video_comp])
+                    yield event.chain_result([comp])
                 else:
-                    # 适配器过老，退回 CQ:video
+                    # 2) 极老适配器：回退 CQ 码方式
                     cq = f"[CQ:video,file={video_url},cover={cover},title={title}]"
                     yield event.plain_result(cq)
+
             except Exception as send_err:
-                logger.warning(f"[bilibili_parse] 组件方式发送失败，转用 CQ:video：{send_err}")
+                # 2) 组件失败：回退 CQ 码
+                logger.warning(f"[bilibili_parse] 组件方式发送失败，回退CQ:video：{send_err}")
                 cq = f"[CQ:video,file={video_url},cover={cover},title={title}]"
                 yield event.plain_result(cq)
 
-            # 补发文字说明（避免有的平台不显示 caption）
+            # 3) 补发说明文字（避免某些平台不显示 caption）
             yield event.plain_result(caption)
 
         except Exception as e:
