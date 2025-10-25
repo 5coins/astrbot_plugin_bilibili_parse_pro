@@ -131,8 +131,8 @@ class Bilibili(Star):
             # 说明文本（有的平台不显示 caption，所以单独补发一条）
             caption = (
                 f"🎬 标题: {title}\n"
-                f"📦 大小: {size_str}\n"
-                f"👓 清晰度: {quality}\n"
+                # f"📦 大小: {size_str}\n"
+                # f"👓 清晰度: {quality}\n"
                 # f"💬 弹幕: {comment}\n"
                 # f"🔗 直链: {video_url}"
             )
