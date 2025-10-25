@@ -2,8 +2,6 @@
 # -*- coding: utf-8 -*-
 
 import re
-import json
-import traceback
 import aiohttp
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -20,8 +18,6 @@ BILI_LINK_PATTERN = r"(https?://)?(?:www\.)?(?:bilibili\.com/video/(BV\w+|av\d+)
 class Bilibili(Star):
     def __init__(self, context: Context):
         super().__init__(context)
-        # ---- dump 开关（默认关闭，避免刷屏）----
-        self._dump_enabled = False
 
     # ---------- HTTP 工具 ----------
     async def _http_get_json(self, url: str):
@@ -59,99 +55,6 @@ class Bilibili(Star):
             size /= 1024
             i += 1
         return f"{size:.2f} {units[i]}"
-
-    # ---------- 通用 JSON 序列化 / 提取工具 ----------
-    @staticmethod
-    def _to_jsonable(obj):
-        try:
-            return json.loads(json.dumps(obj, ensure_ascii=False, default=str))
-        except Exception:
-            try:
-                return json.loads(json.dumps(getattr(obj, "__dict__", str(obj)), ensure_ascii=False, default=str))
-            except Exception:
-                return str(obj)
-
-    @staticmethod
-    def _maybe_get(obj, names):
-        for n in names:
-            if hasattr(obj, n):
-                return getattr(obj, n)
-        return None
-
-    @staticmethod
-    def _truncate_text(s: str, maxlen: int = 3500) -> str:
-        if s is None:
-            return ""
-        s = str(s)
-        return s if len(s) <= maxlen else (s[:maxlen] + f"\n... [truncated {len(s)-maxlen} chars]")
-
-    def _extract_card_candidates(self, message_obj):
-        """
-        从消息对象里尽量揪出“卡片”相关的字段（各平台字段名可能不同）。
-        """
-        candidates = []
-        if not message_obj:
-            return candidates
-
-        suspect_keys = {"card", "json", "xml", "ark", "template", "content", "message", "segments", "elements", "data"}
-
-        try:
-            d = {}
-            if isinstance(message_obj, dict):
-                d = message_obj
-            else:
-                d = getattr(message_obj, "__dict__", {})
-                if not isinstance(d, dict):
-                    d = {}
-
-            # 平铺搜关键字段
-            for k, v in list(d.items()):
-                if isinstance(k, str) and k.lower() in suspect_keys:
-                    candidates.append({k: v})
-
-            # 字符串形态的 JSON/XML
-            for k in ["message_str", "content", "raw", "raw_message"]:
-                if hasattr(message_obj, k):
-                    val = getattr(message_obj, k)
-                    if isinstance(val, str) and (val.strip().startswith("{") or val.strip().startswith("<")):
-                        candidates.append({k: val})
-
-            # 分片内部再找
-            for key in ["segments", "elements", "message", "data"]:
-                segs = d.get(key) or getattr(message_obj, key, None)
-                if isinstance(segs, list):
-                    for idx, seg in enumerate(segs):
-                        if isinstance(seg, dict):
-                            hit = {kk: vv for kk, vv in seg.items() if isinstance(kk, str) and kk.lower() in suspect_keys}
-                            if hit:
-                                candidates.append({f"{key}[{idx}]": hit})
-                        else:
-                            candidates.append({f"{key}[{idx}]": seg})
-        except Exception as e:
-            logger.warning(f"[bilibili_parse][dump] 提取卡片字段失败: {e}")
-
-        return candidates
-
-    def _snapshot_event(self, event: AstrMessageEvent):
-        """
-        将关键字段做一次可序列化快照，便于日志/回显。
-        """
-        msg = getattr(event, "message_obj", None)
-        payload = {
-            "meta": {
-                "platform": getattr(event, "platform", None),
-                "guild_id": getattr(event, "guild_id", None),
-                "channel_id": getattr(event, "channel_id", None),
-                "user_id": getattr(event, "user_id", None),
-                "message_id": getattr(event, "message_id", None),
-                "message_type": getattr(event, "message_type", None) or getattr(event, "type", None),
-            },
-            "text": getattr(msg, "message_str", None),
-            "message_obj": self._to_jsonable(msg),
-            "raw_event": self._to_jsonable(self._maybe_get(event, ["raw_event", "raw", "original_event", "source_event"])),
-            "card_candidates": self._to_jsonable(self._extract_card_candidates(msg)),
-        }
-        return payload
 
     # ---------- 核心：取视频信息 ----------
     async def get_video_info(self, bvid: str, accept_qn: int = 80):
@@ -258,54 +161,3 @@ class Bilibili(Star):
         except Exception as e:
             logger.error(f"[bilibili_parse] 处理异常: {e}", exc_info=True)
             yield event.plain_result(f"处理B站视频链接时发生错误: {e}")
-
-    # ---------- 新增：消息 dump 接收器（匹配任意消息；默认仅写日志） ----------
-    @filter.regex(r"[\s\S]*")
-    @event_message_type(EventMessageType.ALL)
-    async def _debug_dump_any_message(self, event: AstrMessageEvent):
-        """
-        一个“透明”的消息接收器：
-        - 当收到 '#dump on|off|show' 时，切换或回显；
-        - 其他情况下若已开启 dump，则把本条消息的快照写入日志；
-        - 不会影响你其它业务处理器（默认不回消息）。
-        """
-        try:
-            text = getattr(event.message_obj, "message_str", "") or ""
-            cmd = re.match(r"^\s*#dump(?:\s+(on|off|show))?\s*$", text, re.I)
-
-            if cmd:
-                action = (cmd.group(1) or "").lower()
-                if action == "on":
-                    self._dump_enabled = True
-                    yield event.plain_result("✅ dump 已开启：后续消息将写入日志（不回消息）。")
-                    return
-                elif action == "off":
-                    self._dump_enabled = False
-                    yield event.plain_result("🟡 dump 已关闭。")
-                    return
-                else:  # show 或无参：仅回显当前消息
-                    payload = self._snapshot_event(event)
-                    pretty = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-                    pretty = self._truncate_text(pretty, 4000)
-                    yield event.plain_result(f"🔎 当前消息 dump 预览（已截断）：\n```json\n{pretty}\n```")
-                    # 仍然写日志
-                    logger.info(f"[bilibili_parse][dump] {json.dumps(payload, ensure_ascii=False, default=str)}")
-                    # 如需同时落盘，可取消注释：
-                    # with open("astrbot_msg_dump.jsonl", "a", encoding="utf-8") as f:
-                    #     f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                    return
-
-            # 非命令场景：若开启了 dump，则记录日志但不打扰会话
-            if self._dump_enabled:
-                payload = self._snapshot_event(event)
-                logger.info(f"[bilibili_parse][dump] {json.dumps(payload, ensure_ascii=False, default=str)}")
-                # 同步落盘可选：
-                # with open("astrbot_msg_dump.jsonl", "a", encoding="utf-8") as f:
-                #     f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-
-        except Exception as e:
-            logger.error(f"[bilibili_parse][dump] 处理异常: {e}\n{traceback.format_exc()}")
-            # 出错也尽量不打扰会话；仅在命令时回报
-            text = getattr(event.message_obj, "message_str", "") or ""
-            if text.strip().startswith("#dump"):
-                yield event.plain_result(f"❌ dump 出错：{e}")
