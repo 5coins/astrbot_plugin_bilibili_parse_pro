@@ -8,11 +8,13 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api.event.filter import event_message_type, EventMessageType
 
-# 更稳健的 B 站视频链接识别（兼容结尾 / 或带参数）
-BILI_VIDEO_PATTERN = r"(https?://)?(?:www\.)?bilibili\.com/video/(BV\w+|av\d+)(?:/|\?|$)"
+# 统一匹配：普通视频页 + b23 短链
+# 例： https://www.bilibili.com/video/BV17x411w7KC
+#     https://b23.tv/vg9xOFG
+BILI_LINK_PATTERN = r"(https?://)?(?:www\.)?(?:bilibili\.com/video/(BV\w+|av\d+)(?:/|\?|$)|b23\.tv/[A-Za-z0-9_-]+)"
 
 
-@register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（含兜底）", "1.1.0")
+@register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（含b23短链兜底）", "1.2.0")
 class Bilibili(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -28,6 +30,17 @@ class Bilibili(Star):
         except Exception as e:
             logger.error(f"[bilibili_parse] HTTP GET 失败: {e}")
             return None
+
+    async def _expand_url(self, url: str) -> str:
+        """跟随短链重定向，返回最终 URL（用于 b23.tv）"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, allow_redirects=True, timeout=20) as resp:
+                    # resp.url 为最终跳转后的 URL
+                    return str(resp.url)
+        except Exception as e:
+            logger.error(f"[bilibili_parse] 短链展开失败: {e}")
+            return url  # 失败则原样返回，后续再尝试解析
 
     # ---------- 工具：文件大小格式化 ----------
     @staticmethod
@@ -67,23 +80,41 @@ class Bilibili(Star):
             "comment": item.get("comment", ""),
         }
 
-    # ---------- 入口：匹配 B 站视频链接 ----------
-    @filter.regex(BILI_VIDEO_PATTERN)
+    # ---------- 入口：匹配 B 站视频链接（含 b23.tv） ----------
+    @filter.regex(BILI_LINK_PATTERN)
     @event_message_type(EventMessageType.ALL)
     async def bilibili_parse(self, event: AstrMessageEvent):
         """
         解析 B 站视频并直接发送视频：
-        1) 优先用 Video.fromURL + event.chain_result 发送原生视频；
-        2) 若不支持，回退为 CQ:video；
-        3) 最后补发文字说明（避免平台不显示 caption）。
+        1) 匹配 bilibili.com/video/BV... 或 b23.tv 短链；
+        2) 若为 b23.tv，先展开到最终 URL，再抽取 BV/av；
+        3) 优先用 Video.fromURL + event.chain_result 发送原生视频；
+        4) 若不支持，回退为 CQ:video；
+        5) 最后补发文字说明（避免平台不显示 caption）。
         """
         try:
             text = event.message_obj.message_str
-            m = re.search(BILI_VIDEO_PATTERN, text)
+            m = re.search(BILI_LINK_PATTERN, text)
             if not m:
                 return
 
-            bvid = m.group(2)  # BV... 或 av123...
+            matched_url = m.group(0)
+
+            # 如果是 b23.tv 短链，先展开
+            if "b23.tv" in matched_url:
+                expanded = await self._expand_url(matched_url)
+                # 把展开后的 URL 作为接下来解析的文本
+                text = expanded
+            else:
+                text = matched_url
+
+            # 从（可能已展开的）URL 中提取 BV/av
+            m_bvid = re.search(r"/video/(BV\w+|av\d+)", text)
+            if not m_bvid:
+                yield event.plain_result("暂不支持该链接类型（可能是番剧/直播/专栏）。仅支持普通视频页。")
+                return
+
+            bvid = m_bvid.group(1)
             info = await self.get_video_info(bvid, 80)
             if not info or info.get("code") != 0:
                 msg = info.get("msg", "解析失败") if info else "解析失败"
