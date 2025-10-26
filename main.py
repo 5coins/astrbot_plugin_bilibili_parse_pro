@@ -39,36 +39,48 @@ TMPL = '''
 # 🔹 新闻卡片模板（可选图片）
 # -----------------------------------------
 NEWS_TMPL = '''
-<div style="width: 880px; box-sizing: border-box; background: #0d1117; color: #e6edf3;
-            border-radius: 16px; padding: 20px; font-family: -apple-system,BlinkMacSystemFont,
-            Segoe UI,Roboto,Helvetica,Arial,sans-serif; line-height: 1.7;">
-  {% if cover %}
-  <img src="{{ cover }}" alt="" style="width: 100%; display: block; margin: 0; border-radius: 12px;">
-  {% endif %}
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+</head>
+<body style="margin:0; padding:0; background:#0b0f14;">
+  <div style="width:100%; box-sizing:border-box; background:#0d1117; color:#e6edf3;
+              border-radius:16px; padding:28px; font-family:-apple-system,BlinkMacSystemFont,
+              Segoe UI,Roboto,Helvetica,Arial,sans-serif; line-height:1.75;">
+    {% if cover %}
+    <div style="width:100%; height:360px; border-radius:12px; overflow:hidden;">
+      <img src="{{ cover }}" alt="" style="width:100%; height:100%; display:block; object-fit:cover;">
+    </div>
+    {% endif %}
 
-  <h2 style="margin: 14px 0 6px; font-size: 22px; font-weight: 700; color: #e6edf3;">
-    三星 Galaxy XR 支持轻松侧载应用且拥有开放引导程序
-  </h2>
+    <h2 style="margin:18px 0 8px; font-size:28px; font-weight:800; color:#e6edf3;">
+      三星 Galaxy XR 支持轻松侧载应用且拥有开放引导程序
+    </h2>
 
-  <p style="margin: 0 0 10px; font-size: 16px; color: #c9d1d9;">
-    三星 Galaxy XR 默认支持侧载 APK 文件，无需连接 PC 或启用开发者模式，同时还拥有开放的引导程序。
-    这使得谷歌的 Android XR 平台成为三大独立 XR 平台中最开放的系统。相比之下，苹果的 visionOS 完全不允许侧载应用，
-    而 Meta 的 Horizon OS 需要注册开发者账户并连接外部设备才能侧载。
-  </p>
+    <p style="margin:0 0 12px; font-size:18px; color:#c9d1d9;">
+      三星 Galaxy XR 默认支持侧载 APK 文件，无需连接 PC 或启用开发者模式，同时还拥有开放的引导程序。
+      这使得谷歌的 Android XR 平台成为三大独立 XR 平台中最开放的系统。相比之下，苹果的 visionOS 完全不允许侧载应用，
+      而 Meta 的 Horizon OS 需要注册开发者账户并连接外部设备才能侧载。
+    </p>
 
-  <p style="margin: 0 0 8px; font-size: 16px; color: #c9d1d9;">
-    UploadVR 确认，用户可以直接在 Galaxy XR 的内置 Chrome 浏览器中下载 Android APK 文件，
-    只需在设置中给予浏览器安装“未知应用”的权限即可安装。此外，用户甚至可以解锁设备的引导程序，理论上可以安装自定义操作系统。
-  </p>
+    <p style="margin:0 0 12px; font-size:18px; color:#c9d1d9;">
+      UploadVR 确认，用户可以直接在 Galaxy XR 的内置 Chrome 浏览器中下载 Android APK 文件，
+      只需在设置中给予浏览器安装“未知应用”的权限即可安装。此外，用户甚至可以解锁设备的引导程序，理论上可以安装自定义操作系统。
+    </p>
 
-  <div style="margin-top: 10px;">
-    <span style="display: inline-block; padding: 6px 10px; font-size: 14px; border-radius: 8px;
-                 background: #111827; color: #9ca3af;">
-      UploadVR
-    </span>
+    <div style="margin-top:12px;">
+      <span style="display:inline-block; padding:8px 12px; font-size:16px; border-radius:10px;
+                   background:#111827; color:#9ca3af;">
+        UploadVR
+      </span>
+    </div>
   </div>
-</div>
+</body>
+</html>
 '''
+
 
 # -----------------------------------------
 # 🔹 主类
