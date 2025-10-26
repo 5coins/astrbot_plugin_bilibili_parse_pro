@@ -228,6 +228,23 @@ class Bilibili(Star):
             # 3) 补发文字说明
             yield event.plain_result(caption)
 
+# 自定义的 Jinja2 模板，支持 CSS
+TMPL = '''
+<div style="font-size: 32px;">
+<h1 style="color: black">Todo List</h1>
+
+<ul>
+{% for item in items %}
+    <li>{{ item }}</li>
+{% endfor %}
+</div>
+'''
+
+@filter.command("todo")
+async def custom_t2i_tmpl(self, event: AstrMessageEvent):
+    url = await self.html_render(TMPL, {"items": ["吃饭", "睡觉", "玩原神"]}) # 第二个参数是 Jinja2 的渲染数据
+    yield event.image_result(url)
+
         except Exception as e:
             logger.error(f"[bilibili_parse] 处理异常: {e}", exc_info=True)
             yield event.plain_result(f"处理B站视频链接时发生错误: {e}")
