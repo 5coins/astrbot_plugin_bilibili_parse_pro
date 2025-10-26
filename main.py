@@ -27,14 +27,15 @@ CARD_ESCAPED_LINK_PATTERN = (
 BV_OR_AV_ID_PATTERN = r"(BV[0-9A-Za-z]{10}|av\d+)"
 
 # 自定义的 Jinja2 模板，用于生成 Todo List 图片（支持 CSS）
-TMPL = '''
-<div style="font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; font-size: 28px; padding: 24px; line-height: 1.4;">
-  <h1 style="margin: 0 0 16px; font-size: 40px; color: #111;">Todo List</h1>
-  <ul style="margin: 0; padding-left: 28px;">
-  {% for item in items %}
-    <li style="margin: 6px 0;">{{ item }}</li>
-  {% endfor %}
-  </ul>
+NEWS_TMPL = '''
+<div style="font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; font-size: 28px; padding: 24px; line-height: 1.4; color: #333; background-color: #f8f8f8; border-radius: 12px; max-width: 800px; margin: 0 auto;">
+  {% if image_url %}
+    <img src="{{ image_url }}" style="max-width: 100%; height: auto; display: block; margin: 0 auto 20px; border-radius: 8px;">
+  {% endif %}
+  <h1 style="margin: 0 0 16px; font-size: 40px; color: #111; text-align: center;">{{ title }}</h1>
+  <p style="margin: 0 0 1em; text-indent: 2em; text-align: justify;">{{ paragraph1 }}</p>
+  <p style="margin: 0 0 1em; text-indent: 2em; text-align: justify;">{{ paragraph2 }}</p>
+  <p style="font-size: 0.8em; color: #777; margin-top: 20px; text-align: right;">{{ source }}</p>
 </div>
 '''
 
