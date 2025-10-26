@@ -27,7 +27,7 @@ CARD_ESCAPED_LINK_PATTERN = (
 BV_OR_AV_ID_PATTERN = r"(BV[0-9A-Za-z]{10}|av\d+)"
 
 # 自定义的 Jinja2 模板，用于生成 Todo List 图片（支持 CSS）
-TMPL = '''
+TMPL_TODO = '''
 <div style="font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; font-size: 28px; padding: 24px; line-height: 1.4;">
   <h1 style="margin: 0 0 16px; font-size: 40px; color: #111;">Todo List</h1>
   <ul style="margin: 0; padding-left: 28px;">
@@ -38,18 +38,21 @@ TMPL = '''
 </div>
 '''
 
-# 新闻文章的 Jinja2 模板，支持图片、标题、段落和来源
-NEWS_TMPL = '''
-<div style="font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; font-size: 28px; padding: 24px; line-height: 1.4; color: #333; background-color: #f8f8f8; border-radius: 12px; max-width: 800px; margin: 0 auto;">
-  {% if image_url %}
-    <img src="{{ image_url }}" style="max-width: 100%; height: auto; display: block; margin: 0 auto 20px; border-radius: 8px;">
-  {% endif %}
-  <h1 style="margin: 0 0 16px; font-size: 40px; color: #111; text-align: center;">{{ title }}</h1>
-  <p style="margin: 0 0 1em; text-indent: 2em; text-align: justify;">{{ paragraph1 }}</p>
-  <p style="margin: 0 0 1em; text-indent: 2em; text-align: justify;">{{ paragraph2 }}</p>
-  <p style="font-size: 0.8em; color: #777; margin-top: 20px; text-align: right;">{{ source }}</p>
+# 新增：新闻卡片模板，用于排版类似文章摘要的内容
+TMPL_NEWS_CARD = '''
+<div style="font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; font-size: 18px; padding: 24px; line-height: 1.6; background-color: #fff; color: #333; max-width: 600px; margin: 0 auto; box-sizing: border-box;">
+    {% if image_url %}
+    <img src="{{ image_url }}" alt="Cover Image" style="width: 100%; display: block; margin-bottom: 20px; border-radius: 8px;">
+    {% endif %}
+    <h3 style="margin: 0 0 16px; font-size: 28px; color: #111; font-weight: bold;">{{ title }}</h3>
+    <p style="margin: 0 0 16px;">{{ paragraph1 }}</p>
+    <p style="margin: 0 0 16px;">{{ paragraph2 }}</p>
+    {% if source %}
+    <p style="margin: 0; font-size: 14px; color: #666;">来源：{{ source }}</p>
+    {% endif %}
 </div>
 '''
+
 
 @register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（含b23短链兜底，支持卡片）", "1.3.0")
 class Bilibili(Star):
@@ -174,7 +177,6 @@ class Bilibili(Star):
         }
 
     # ---------- 入口：匹配 B 站视频链接（含卡片） ----------
-    # 重要：这里不用 @filter.regex，以便卡片消息也能进入，再在函数内做匹配与早退
     @event_message_type(EventMessageType.ALL)
     async def bilibili_parse(self, event: AstrMessageEvent):
         """
@@ -287,33 +289,81 @@ class Bilibili(Star):
             items = ["吃饭", "睡觉", "玩原神"]
 
         # 渲染 HTML -> 图片（框架自带的 html_render）
-        url = await self.html_render(TMPL, {"items": items})
+        url = await self.html_render(TMPL_TODO, {"items": items})
 
         # 发送图片
         yield event.image_result(url)
 
-    # ---------- 新增：新闻文章排版命令 ----------
-    @filter.command("news") # 你可以通过发送 "news" 命令来触发
-    async def news_article_card(self, event: AstrMessageEvent):
+    # ---------- 新增：新闻卡片命令 ----------
+    @filter.command("news")
+    async def news_card(self, event: AstrMessageEvent):
         """
-        生成一篇新闻文章的图片卡片。
-        目前内容是固定的，你可以修改代码中的 content 字典来更新。
+        生成一篇新闻/文章摘要的图片卡片。
+        用法：
+        news [图片直链]
+        三星 Galaxy XR 支持轻松侧载应用且拥有开放引导程序
+        三星 Galaxy XR 默认支持侧载 APK 文件，无需连接 PC 或启用开发者模式，同时还拥有开放的引导程序。这使得谷歌的 Android XR 平台成为三大独立 XR 平台中最开放的系统。相比之下，苹果的 visionOS 完全不允许侧载应用，而 Meta 的 Horizon OS 需要注册开发者账户并连接外部设备才能侧载。
+        UploadVR 确认，用户可以直接在 Galaxy XR 的内置 Chrome 浏览器中下载 Android APK 文件，只需在设置中给予浏览器安装"未知应用"的权限即可安装。此外，用户甚至可以解锁设备的引导程序，理论上可以安装自定义操作系统。
+        来源：UploadVR
         """
-        # 替换成你的图片直链
-        # 示例：我这里用了一个 Imgur 的占位图链接，实际使用时请替换为你的图片直链
-        image_url = "https://i.imgur.com/your_image_here.jpg" # <-- !!! 请将此链接替换为实际的图片直链 !!!
+        # 提取消息内容
+        raw_message = getattr(event, "message_str", "")
+        # 移除命令前缀
+        content = re.sub(r"^\s*news\s*", "", raw_message, flags=re.I | re.S).strip()
 
-        # 你的新闻文案内容
-        content = {
+        # 假设内容格式为：
+        # [图片直链] (可选)
+        # 标题
+        # 段落1
+        # 段落2
+        # 来源：XXX (可选)
+
+        lines = content.split('\n')
+        image_url = None
+        title = ""
+        paragraphs = []
+        source = None
+
+        # 尝试解析图片直链
+        if lines and lines[0].startswith("http"):
+            image_url = lines.pop(0).strip() # 移除第一行作为图片URL
+
+        # 标题是下一行
+        if lines:
+            title = lines.pop(0).strip()
+
+        # 剩余行作为段落或来源
+        current_paragraph = []
+        for line in lines:
+            line = line.strip()
+            if line.startswith("来源："):
+                source = line[3:].strip() # 提取来源内容
+                break # 来源是最后一部分，找到后停止
+            elif line: # 非空行作为段落的一部分
+                current_paragraph.append(line)
+            else: # 空行表示段落分隔
+                if current_paragraph:
+                    paragraphs.append(" ".join(current_paragraph))
+                    current_paragraph = []
+        if current_paragraph: # 处理最后一个段落
+            paragraphs.append(" ".join(current_paragraph))
+
+
+        # 确保至少有两个段落，如果不足则填充空字符串
+        paragraph1 = paragraphs[0] if len(paragraphs) > 0 else ""
+        paragraph2 = paragraphs[1] if len(paragraphs) > 1 else ""
+
+        # 准备渲染数据
+        data = {
             "image_url": image_url,
-            "title": "三星 Galaxy XR 支持轻松侧载应用且拥有开放引导程序",
-            "paragraph1": "三星 Galaxy XR 默认支持侧载 APK 文件，无需连接 PC 或启用开发者模式，同时还拥有开放的引导程序。这使得谷歌的 Android XR 平台成为三大独立 XR 平台中最开放的系统。相比之下，苹果的 visionOS 完全不允许侧载应用，而 Meta 的 Horizon OS 需要注册开发者账户并连接外部设备才能侧载。",
-            "paragraph2": "UploadVR 确认，用户可以直接在 Galaxy XR 的内置 Chrome 浏览器中下载 Android APK 文件，只需在设置中给予浏览器安装\"未知应用\"的权限即可安装。此外，用户甚至可以解锁设备的引导程序，理论上可以安装自定义操作系统。",
-            "source": "来源：UploadVR"
+            "title": title,
+            "paragraph1": paragraph1,
+            "paragraph2": paragraph2,
+            "source": source,
         }
 
         # 渲染 HTML -> 图片
-        url = await self.html_render(NEWS_TMPL, content)
+        url = await self.html_render(TMPL_NEWS_CARD, data)
 
         # 发送图片
         yield event.image_result(url)
