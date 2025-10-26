@@ -9,21 +9,13 @@ from astrbot.api import logger
 from astrbot.api.event.filter import event_message_type, EventMessageType
 
 # 统一匹配：普通视频页 + b23 短链 + bili2233 兜底
-# 例： https://www.bilibili.com/video/BV17x411w7KC
-#     https://b23.tv/vg9xOFG
-#     https://bili2233.cn/xxxxxx
 BILI_LINK_PATTERN = r"(https?://)?(?:www\.)?(?:bilibili\.com/video/(BV[0-9A-Za-z]{10}|av\d+)(?:/|\?|$)|b23\.tv/[A-Za-z0-9_-]+|bili2233\.cn/[A-Za-z0-9_-]+)"
-
-# 卡片（JSON 转义）里的链接形式，如：
-# https:\/\/b23.tv\/abc123 或 https:\/\/www.bilibili.com\/video\/BVxxxxxxxxxxx
 CARD_ESCAPED_LINK_PATTERN = (
     r"https:\\\\/\\\\/(?:www\\.)?(?:"
     r"bilibili\.com\\\\/video\\\\/(BV[0-9A-Za-z]{10}|av\\d+)(?:\\\\/|\\?|$)"
     r"|b23\.tv\\\\/[A-Za-z0-9_-]+"
     r"|bili2233\.cn\\\\/[A-Za-z0-9_-]+)"
 )
-
-# 兜底只抓 ID（卡片里可能只有 ID，不含完整链接）
 BV_OR_AV_ID_PATTERN = r"(BV[0-9A-Za-z]{10}|av\d+)"
 
 # 自定义的 Jinja2 模板，用于生成 Todo List 图片（支持 CSS）
@@ -53,6 +45,16 @@ TMPL_NEWS_CARD = '''
 </div>
 '''
 
+# 新增：简洁新闻模板，用于排版类似“Meta 裁员”这种纯文本新闻
+TMPL_NEWS_SIMPLE = '''
+<div style="font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; font-size: 20px; line-height: 1.6; padding: 40px; max-width: 700px; margin: 0 auto; background-color: #fff; color: #333; box-sizing: border-box;">
+    <h2 style="font-size: 30px; font-weight: bold; margin: 0 0 20px; text-align: center;">{{ title }}</h2>
+    <p style="margin: 0 0 20px;">{{ body_text }}</p>
+    {% if author %}
+    <p style="margin: 0; font-size: 18px; color: #666; text-align: right;">{{ author }}</p>
+    {% endif %}
+</div>
+'''
 
 @register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（含b23短链兜底，支持卡片）", "1.3.0")
 class Bilibili(Star):
@@ -364,6 +366,43 @@ class Bilibili(Star):
 
         # 渲染 HTML -> 图片
         url = await self.html_render(TMPL_NEWS_CARD, data)
+
+        # 发送图片
+        yield event.image_result(url)
+
+    # ---------- 新增：简洁新闻卡片命令 ----------
+    @filter.command("meta_news") # 使用一个不同的命令名，避免与 "news" 混淆
+    async def meta_news_card(self, event: AstrMessageEvent):
+        """
+        生成一篇简洁新闻的图片卡片，适用于纯文本内容。
+        排版模仿“Meta 裁员”的图片样式。
+
+        用法：
+        meta_news
+        Meta 裁员据传基于代码提交量决定
+        Hyperbolic CTO 金宇晨透露，Meta 内部人士称此次裁员是基于代码差异行数 (lines of code diffs) 来决定的。这解释了为什么构建模型的员工和新员工受到的冲击最为严重。
+        金宇晨
+        """
+        raw_message = getattr(event, "message_str", "")
+        # 移除命令前缀
+        content = re.sub(r"^\s*meta_news\s*", "", raw_message, flags=re.I | re.S).strip()
+
+        lines = content.split('\n')
+        
+        # 按照图片结构解析内容
+        title = lines[0].strip() if len(lines) > 0 else "无标题"
+        body_text = lines[1].strip() if len(lines) > 1 else "无正文"
+        author = lines[2].strip() if len(lines) > 2 else None # 作者是可选的
+
+        # 准备渲染数据
+        data = {
+            "title": title,
+            "body_text": body_text,
+            "author": author,
+        }
+
+        # 渲染 HTML -> 图片
+        url = await self.html_render(TMPL_NEWS_SIMPLE, data)
 
         # 发送图片
         yield event.image_result(url)
