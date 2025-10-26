@@ -27,7 +27,7 @@ CARD_ESCAPED_LINK_PATTERN = (
 BV_OR_AV_ID_PATTERN = r"(BV[0-9A-Za-z]{10}|av\d+)"
 
 # 自定义的 Jinja2 模板，用于生成 Todo List 图片（支持 CSS）
-NEWS_TMPL = '''
+TMPL = '''
 <div style="font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; font-size: 28px; padding: 24px; line-height: 1.4; color: #333; background-color: #f8f8f8; border-radius: 12px; max-width: 800px; margin: 0 auto;">
   {% if image_url %}
     <img src="{{ image_url }}" style="max-width: 100%; height: auto; display: block; margin: 0 auto 20px; border-radius: 8px;">
