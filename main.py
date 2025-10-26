@@ -26,6 +26,18 @@ CARD_ESCAPED_LINK_PATTERN = (
 # 兜底只抓 ID（卡片里可能只有 ID，不含完整链接）
 BV_OR_AV_ID_PATTERN = r"(BV[0-9A-Za-z]{10}|av\d+)"
 
+# 自定义的 Jinja2 模板，用于生成 Todo List 图片（支持 CSS）
+TMPL = '''
+<div style="font-family: -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif; font-size: 28px; padding: 24px; line-height: 1.4;">
+  <h1 style="margin: 0 0 16px; font-size: 40px; color: #111;">Todo List</h1>
+  <ul style="margin: 0; padding-left: 28px;">
+  {% for item in items %}
+    <li style="margin: 6px 0;">{{ item }}</li>
+  {% endfor %}
+  </ul>
+</div>
+'''
+
 @register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（含b23短链兜底，支持卡片）", "1.3.0")
 class Bilibili(Star):
     def __init__(self, context: Context):
@@ -227,3 +239,43 @@ class Bilibili(Star):
 
             # 3) 补发文字说明
             yield event.plain_result(caption)
+
+        except Exception as e:
+            logger.error(f"[bilibili_parse] 处理 B 站链接时发生未知错误: {e}")
+            # 可以选择在这里发送一个错误消息给用户
+            # yield event.plain_result("处理 B 站链接时发生错误，请稍后再试。")
+
+    # ---------- 新增：Todo List 命令 ----------
+    @filter.command("todo")
+    async def todo_card(self, event: AstrMessageEvent):
+        """
+        生成 Todo List 图片。
+
+        用法：
+        - 直接发送：todo
+        - 或携带内容：todo 吃饭 睡觉 | 玩原神
+          （支持空格、逗号/中文逗号、竖线分隔）
+        """
+        # 取原始消息文本
+        raw = getattr(event, "message_str", None) \
+              or getattr(getattr(event, "message_obj", None), "message_str", "") \
+              or ""
+
+        # 把前缀命令去掉，拿到参数部分
+        m = re.search(r"^\s*todo\b(.*)$", raw, re.I | re.S)
+        rest = m.group(1).strip() if m else ""
+
+        if rest:
+            # 支持多种分隔符：空格 / 英文逗号 / 中文逗号 / 竖线
+            parts = re.split(r"[,\u3001\uFF0C|\s]+", rest)
+            items = [p for p in parts if p]
+        else:
+            # 默认示例
+            items = ["吃饭", "睡觉", "玩原神"]
+
+        # 渲染 HTML -> 图片（框架自带的 html_render）
+        url = await self.html_render(TMPL, {"items": items})
+
+        # 发送图片
+        yield event.image_result(url)
+
