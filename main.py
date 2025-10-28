@@ -2,40 +2,20 @@
 # -*- coding: utf-8 -*-
 
 import re
-
 import aiohttp
-
-from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent
-from astrbot.api.event.filter import EventMessageType, event_message_type
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
+from astrbot.api import logger
+from astrbot.api.event.filter import event_message_type, EventMessageType
 
-# 统一匹配：普通视频页 + b23 短链 + bili2233 兜底
+# 统一匹配：普通视频页 + b23 短链
 # 例： https://www.bilibili.com/video/BV17x411w7KC
 #     https://b23.tv/vg9xOFG
-#     https://bili2233.cn/xxxxxx
-BILI_LINK_PATTERN = r"(https?://)?(?:www\.)?(?:bilibili\.com/video/(BV[0-9A-Za-z]{10}|av\d+)(?:/|\?|$)|b23\.tv/[A-Za-z0-9_-]+|bili2233\.cn/[A-Za-z0-9_-]+)"
-
-# 卡片（JSON 转义）里的链接形式，如：
-# https:\/\/b23.tv\/abc123 或 https:\/\/www.bilibili.com\/video\/BVxxxxxxxxxxx
-CARD_ESCAPED_LINK_PATTERN = (
-    r"https:\\\\/\\\\/(?:www\\.)?(?:"
-    r"bilibili\.com\\\\/video\\\\/(BV[0-9A-Za-z]{10}|av\\d+)(?:\\\\/|\\?|$)"
-    r"|b23\.tv\\\\/[A-Za-z0-9_-]+"
-    r"|bili2233\.cn\\\\/[A-Za-z0-9_-]+)"
-)
-
-# 兜底只抓 ID（更严格：避免把 AV1 编码等误识别为 av 号）
-BV_OR_AV_ID_PATTERN = r"(BV[0-9A-Za-z]{10}|av\d{5,})"
+BILI_LINK_PATTERN = r"(https?://)?(?:www\.)?(?:bilibili\.com/video/(BV\w+|av\d+)(?:/|\?|$)|b23\.tv/[A-Za-z0-9_-]+)"
 
 
-@register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（含b23短链兜底，支持卡片）", "1.3.1")
+@register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（含b23短链兜底）", "1.2.0")
 class Bilibili(Star):
-    """
-    Bilibili Star: Parses Bilibili video links (including short links and card messages)
-    and sends the video directly.
-    """
-
     def __init__(self, context: Context):
         super().__init__(context)
 
@@ -52,24 +32,22 @@ class Bilibili(Star):
             return None
 
     async def _expand_url(self, url: str) -> str:
-        """跟随短链重定向，返回最终 URL（用于 b23.tv / bili2233.cn）"""
+        """跟随短链重定向，返回最终 URL（用于 b23.tv）"""
         try:
-            if not url.startswith("http"):
-                url = "https://" + url
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, allow_redirects=True, timeout=20) as resp:
+                    # resp.url 为最终跳转后的 URL
                     return str(resp.url)
         except Exception as e:
             logger.error(f"[bilibili_parse] 短链展开失败: {e}")
-            return url  # 失败则原样返回
+            return url  # 失败则原样返回，后续再尝试解析
 
     # ---------- 工具：文件大小格式化 ----------
     @staticmethod
     def _fmt_size(raw) -> str:
-        """格式化文件大小"""
         try:
             size = int(raw)
-        except (ValueError, TypeError):
+        except Exception:
             return "未知"
         units = ["B", "KB", "MB", "GB", "TB"]
         i = 0
@@ -77,102 +55,6 @@ class Bilibili(Star):
             size /= 1024
             i += 1
         return f"{size:.2f} {units[i]}"
-
-    # ---------- 工具：去掉 JSON 转义 ----------
-    @staticmethod
-    def _unescape_card_url(s: str) -> str:
-        """
-        去除 JSON 转义字符，将 `\\\/` 还原为 `/`，`\\\\` 还原为 `\`。
-        """
-        # 先把 \\ 转义成 \ ，再把 \/ 还原成 /
-        return s.replace("\\\\", "\\").replace("\\/", "/")
-
-    # ---------- 工具：是否为“纯视频消息”（非链接/卡片） ----------
-    @staticmethod
-    def _is_pure_video_event(event: AstrMessageEvent) -> bool:
-        """
-        尽量宽松地判断：
-        - 适配 OneBot CQ 码：[CQ:video,...]
-        - 常见结构化 payload 含 "type":"video" / "msgtype":"video" / "type=video"
-        - 若文本里已包含 bilibili/b23/bili2233 链接/标识，则不判定为纯视频
-        """
-        parts = []
-        for attr in ("message_str", "raw_message"):
-            v = getattr(event, attr, None)
-            if v:
-                parts.append(str(v))
-        msg_obj = getattr(event, "message_obj", None)
-        if msg_obj is not None:
-            parts.append(str(msg_obj))
-            # 一些适配器可能有明确的类型字段
-            t = getattr(msg_obj, "type", None)
-            if isinstance(t, str) and t.lower() == "video":
-                s = " ".join(parts).lower()
-                if not any(k in s for k in ("bilibili.com", "b23.tv", "bili2233.cn", " bv")):
-                    return True
-
-        s = " ".join(parts).lower()
-        if any(k in s for k in ("bilibili.com", "b23.tv", "bili2233.cn", " bv")):
-            return False  # 存在 B站痕迹，交给后续流程判定
-        if "[cq:video" in s or 'type="video"' in s or "type=video" in s or '"video"' in s:
-            return True
-        return False
-
-    # ---------- 工具：从事件中抽取链接（纯文本 + 卡片） ----------
-    def _extract_bili_url_from_event(self, event: AstrMessageEvent) -> str | None:
-        """
-        从事件消息中提取 Bilibili 链接。
-        尝试从纯文本、卡片字符串（JSON 转义）和兜底 BV/av ID 中匹配。
-        """
-        candidates_text = []
-
-        # 1) 纯文本来源（不同适配器字段可能不一样，全都兜一下）
-        for attr in ("message_str",):
-            v = getattr(event, attr, None)
-            if v:
-                candidates_text.append(v)
-
-        msg_obj = getattr(event, "message_obj", None)
-        if msg_obj is not None:
-            # astrbot 常见字段
-            v = getattr(msg_obj, "message_str", None)
-            if v:
-                candidates_text.append(v)
-
-            # 2) 卡片对象的字符串化（里面经常是 JSON 转义）
-            candidates_text.append(str(msg_obj))
-
-        # 先尝试在“可读文本”里找标准链接
-        for txt in candidates_text:
-            m = re.search(BILI_LINK_PATTERN, txt)
-            if m:
-                url = m.group(0)
-                if not url.startswith("http"):
-                    url = "https://" + url
-                return url
-
-        # 再在“卡片字符串”里找 JSON 转义链接
-        for txt in candidates_text:
-            m = re.search(CARD_ESCAPED_LINK_PATTERN, txt)
-            if m:
-                url = self._unescape_card_url(m.group(0))
-                # 可能是 // 开头的，统一补齐
-                if url.startswith("//"):
-                    url = "https:" + url
-                if not url.startswith("http"):
-                    url = "https://" + url
-                return url
-
-        # 兜底：只有当文本整体包含 B站相关标识时，才识别裸 ID（避免把 AV1 编码误当 av 号）
-        joined_lower = " ".join(candidates_text).lower()
-        allow_fallback = any(k in joined_lower for k in ("bilibili", "b23.tv", "bili2233.cn", "哔哩", "b站", " bv"))
-        if allow_fallback:
-            for txt in candidates_text:
-                m = re.search(BV_OR_AV_ID_PATTERN, txt)
-                if m:
-                    return f"https://www.bilibili.com/video/{m.group(0)}"
-
-        return None
 
     # ---------- 核心：取视频信息 ----------
     async def get_video_info(self, bvid: str, accept_qn: int = 80):
@@ -187,7 +69,7 @@ class Bilibili(Star):
         if data.get("code") != 0 or not data.get("data"):
             return {"code": -1, "msg": data.get("msg", "解析失败")}
 
-        item = data["data"][0]  # 假设只取第一个数据项
+        item = data["data"][0]
         return {
             "code": 0,
             "title": data.get("title", "未知标题"),
@@ -198,48 +80,41 @@ class Bilibili(Star):
             "comment": item.get("comment", ""),
         }
 
-    # ---------- 入口：匹配 B 站视频链接（含卡片） ----------
-    # 重要：这里不用 @filter.regex，以便卡片消息也能进入，再在函数内做匹配与早退
+    # ---------- 入口：匹配 B 站视频链接（含 b23.tv） ----------
+    @filter.regex(BILI_LINK_PATTERN)
     @event_message_type(EventMessageType.ALL)
     async def bilibili_parse(self, event: AstrMessageEvent):
         """
         解析 B 站视频并直接发送视频：
-        1) 统一从纯文本与卡片里抽取 bilibili.com/video/BV.. | b23.tv | bili2233.cn | 兜底 BV/av；
-        2) 若为短链，先展开到最终 URL，再抽取 BV/av；
+        1) 匹配 bilibili.com/video/BV... 或 b23.tv 短链；
+        2) 若为 b23.tv，先展开到最终 URL，再抽取 BV/av；
         3) 优先用 Video.fromURL + event.chain_result 发送原生视频；
         4) 若不支持，回退为 CQ:video；
         5) 最后补发文字说明（避免平台不显示 caption）。
         """
         try:
-            # 如果是“纯视频消息”（非链接/卡片），直接早退，不做解析
-            if self._is_pure_video_event(event):
+            text = event.message_obj.message_str
+            m = re.search(BILI_LINK_PATTERN, text)
+            if not m:
                 return
 
-            # 从事件中抽取链接（纯文本 + 卡片）
-            matched_url = self._extract_bili_url_from_event(event)
-            if not matched_url:
-                return  # 不是 B 站链接/ID，直接早退
+            matched_url = m.group(0)
 
-            text = matched_url
-
-            # 如果是短链，先展开
-            if any(d in matched_url for d in ("b23.tv", "bili2233.cn")):
-                text = await self._expand_url(matched_url)
+            # 如果是 b23.tv 短链，先展开
+            if "b23.tv" in matched_url:
+                expanded = await self._expand_url(matched_url)
+                # 把展开后的 URL 作为接下来解析的文本
+                text = expanded
+            else:
+                text = matched_url
 
             # 从（可能已展开的）URL 中提取 BV/av
-            # 优先匹配 /video/BVxxxxxx 或 /video/avxxxxxx
-            m_bvid = re.search(r"/video/(BV[0-9A-Za-z]{10}|av\d{5,})", text)
+            m_bvid = re.search(r"/video/(BV\w+|av\d+)", text)
             if not m_bvid:
-                # 有些重定向会落到 ?bvid= 的中间页，这里再兜一层（已加严格 av 位数）
-                m_id = re.search(BV_OR_AV_ID_PATTERN, text)
-                if m_id:
-                    bvid = m_id.group(0)
-                else:
-                    logger.warning(f"[bilibili_parse] 无法从URL中提取BV/av ID: {text}")
-                    return
-            else:
-                bvid = m_bvid.group(1)
+                yield event.plain_result("暂不支持该链接类型（可能是番剧/直播/专栏）。仅支持普通视频页。")
+                return
 
+            bvid = m_bvid.group(1)
             info = await self.get_video_info(bvid, 80)
             if not info or info.get("code") != 0:
                 msg = info.get("msg", "解析失败") if info else "解析失败"
@@ -249,41 +124,34 @@ class Bilibili(Star):
             title = info["title"]
             video_url = info["video_url"]
             cover = info["pic"]
+            size_str = self._fmt_size(info.get("video_size", 0))
+            quality = info.get("quality", "未知清晰度")
+            comment = info.get("comment", "")
 
             # 说明文本（有的平台不显示 caption，所以单独补发一条）
             caption = (
                 f"🎬 标题: {title}\n"
+                # f"📦 大小: {size_str}\n"
+                # f"👓 清晰度: {quality}\n"
+                # f"💬 弹幕: {comment}\n"
+                # f"🔗 直链: {video_url}"
             )
 
             # 1) 尝试官方组件方式发送视频
             try:
                 from astrbot.api.message_components import Video
-
                 video_comp = Video.fromURL(url=video_url)
 
                 if hasattr(event, "chain_result"):
-                    # 使用 chain_result 发送组件，通常更原生
                     yield event.chain_result([video_comp])
                 else:
                     # 2) 适配器太老，回退 CQ 码视频
-                    logger.warning(
-                        "[bilibili_parse] event does not have chain_result, falling back to CQ code."
-                    )
                     cq = f"[CQ:video,file={video_url},cover={cover},title={title}]"
                     yield event.plain_result(cq)
 
-            except ImportError:
-                # 2) astrbot 版本过低，没有 message_components 模块
-                logger.warning(
-                    "[bilibili_parse] astrbot.api.message_components not found, falling back to CQ code."
-                )
-                cq = f"[CQ:video,file={video_url},cover={cover},title={title}]"
-                yield event.plain_result(cq)
             except Exception as send_err:
-                # 2) 组件发送失败，回退 CQ 码视频
-                logger.warning(
-                    f"[bilibili_parse] Component-based sending failed, falling back to CQ code: {send_err}"
-                )
+                # 2) 组件失败，回退 CQ 码视频
+                logger.warning(f"[bilibili_parse] 组件方式发送失败，转用 CQ 码: {send_err}")
                 cq = f"[CQ:video,file={video_url},cover={cover},title={title}]"
                 yield event.plain_result(cq)
 
@@ -291,5 +159,109 @@ class Bilibili(Star):
             yield event.plain_result(caption)
 
         except Exception as e:
-            logger.error(f"[bilibili_parse] 处理B站视频解析时发生未预期错误: {e}", exc_info=True)
-            yield event.plain_result("解析B站视频时发生内部错误。")
+            logger.error(f"[bilibili_parse] 处理异常: {e}", exc_info=True)
+            yield event.plain_result(f"处理B站视频链接时发生错误: {e}")
+
+    # ---------- 功能：/nb 图片复读 ----------
+    @filter.regex(r"/nb")
+    @event_message_type(EventMessageType.ALL)
+    async def nb_image_echo(self, event: AstrMessageEvent):
+        """
+        当消息中同时包含图片与文本“/nb”时，复读该图片。
+        逻辑：
+        - 去除 CQ 片段后的纯文本需严格等于 /nb（忽略首尾空白）
+        - 若包含多张图片，全部按原顺序回传
+        - 优先使用组件 Image.fromURL 发送；若不可用则回退 CQ:image
+        """
+        try:
+            raw = getattr(event.message_obj, "message_str", "") or ""
+            # 提取所有 CQ:image 片段（OneBot 常见）
+            cq_images = re.findall(r"\[CQ:image,[^\]]+\]", raw, flags=re.IGNORECASE)
+
+            # 纯文本（移除全部 CQ 段）
+            text_only = re.sub(r"\[CQ:[^\]]+\]", "", raw).strip()
+            if text_only != "/nb":
+                return
+
+            # 如果没有在文本中发现 CQ:image，尝试从结构化链路中探测（适配部分平台）
+            if not cq_images:
+                image_urls = []
+                chain = getattr(event.message_obj, "message", None) or getattr(event.message_obj, "message_chain", None)
+                if isinstance(chain, list):
+                    for seg in chain:
+                        try:
+                            seg_type = getattr(seg, "type", None)
+                            if not seg_type and isinstance(seg, dict):
+                                seg_type = seg.get("type")
+                            if str(seg_type).lower() in ("image", "photo", "picture"):
+                                data = getattr(seg, "data", None)
+                                if data is None and isinstance(seg, dict):
+                                    data = seg.get("data")
+                                url = None
+                                if isinstance(data, dict):
+                                    url = data.get("url") or data.get("file") or data.get("path")
+                                elif isinstance(seg, dict):
+                                    url = seg.get("url") or seg.get("file") or seg.get("path")
+                                if url:
+                                    image_urls.append(str(url))
+                        except Exception:
+                            continue
+                else:
+                    image_urls = []
+
+                if not image_urls:
+                    return  # 没有图片就不响应
+
+                # 有 URL，尝试组件发送
+                try:
+                    from astrbot.api.message_components import Image
+                    comps = []
+                    for u in image_urls:
+                        if re.match(r"^(https?://|file://|base64://)", u, flags=re.I):
+                            comps.append(Image.fromURL(url=u))
+                    if comps and hasattr(event, "chain_result"):
+                        yield event.chain_result(comps)
+                        return
+                except Exception:
+                    pass
+
+                # 组件不可用且无 CQ 回退，直接结束
+                return
+
+            # 存在 CQ:image 片段 → 先尝试组件发送
+            image_urls = []
+            for seg in cq_images:
+                try:
+                    inside = seg[1:-1]  # CQ:image,....
+                    kv_str = inside.split(",", 1)[1] if "," in inside else ""
+                    fields = {}
+                    for kv in kv_str.split(","):
+                        if "=" in kv:
+                            k, v = kv.split("=", 1)
+                            fields[k.strip()] = v.strip()
+                    url = fields.get("url") or fields.get("file")
+                    if url:
+                        image_urls.append(url)
+                except Exception:
+                    continue
+
+            sent_via_component = False
+            try:
+                from astrbot.api.message_components import Image
+                comps = []
+                for u in image_urls:
+                    if re.match(r"^(https?://|file://|base64://)", u, flags=re.I):
+                        comps.append(Image.fromURL(url=u))
+                if comps and hasattr(event, "chain_result"):
+                    yield event.chain_result(comps)
+                    sent_via_component = True
+            except Exception:
+                sent_via_component = False
+
+            if not sent_via_component:
+                # 回退：直接把原始 CQ:image 片段拼接发回
+                reply = "".join(cq_images)
+                yield event.plain_result(reply)
+
+        except Exception as e:
+            logger.error(f"[/nb_echo] 处理异常: {e}", exc_info=True)
