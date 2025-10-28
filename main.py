@@ -3,13 +3,15 @@
 
 import re
 import aiohttp
-import asyncio # 引入 asyncio 用于 _component_to_http_url 中的 await fn()
+import asyncio # New: for potential async operations within image handling
+from pathlib import Path # New: for local file paths if needed
+import base64 # New: for base64 image handling if needed
 
-from astrbot.api import logger, sp # 引入 sp 用于获取全局配置
+from astrbot.api import logger, sp # sp for global config, especially for callback_api_base
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.event.filter import EventMessageType, event_message_type, filter # 引入 filter 用于新命令
+from astrbot.api.event.filter import EventMessageType, event_message_type
 from astrbot.api.star import Context, Star, register
-from astrbot.api.all import Image, Plain, Reply # 引入 Image, Plain, Reply
+from astrbot.api.all import Image, Plain, Reply, Video # New: Image, Plain, Reply for image echo
 
 
 # 统一匹配：普通视频页 + b23 短链 + bili2233 兜底
@@ -36,14 +38,14 @@ class Bilibili(Star):
     """
     Bilibili Star: Parses Bilibili video links (including short links and card messages)
     and sends the video directly.
+    Also includes an image echo command for demonstration purposes.
     """
 
     def __init__(self, context: Context):
         super().__init__(context)
-        # 为了让 Image.convert_to_web_link 工作，可能需要配置 callback_api_base
-        # 这里从 bot 自身的配置中获取，或者插件配置中获取
-        self.callback_api_base = context.get_config().get("callback_api_base")
-        logger.info(f"Bilibili 插件初始化，callback_api_base: {self.callback_api_base}")
+        # For image echo functionality: callback_api_base is crucial for converting local files to URLs
+        self.callback_api_base = context.get_config().get("callback_api_base") or ""
+        logger.info(f"Bilibili plugin initialized. callback_api_base for image handling: {self.callback_api_base}")
 
 
     # ---------- HTTP 工具 ----------
@@ -205,7 +207,7 @@ class Bilibili(Star):
             "comment": item.get("comment", ""),
         }
 
-    # ---------- 图片回显辅助方法 (从即梦插件中提取) ----------
+    # ---------- 图片回显功能辅助方法 ----------
     async def _component_to_http_url(self, comp) -> str | None:
         """
         尽量把任意图片组件转换为可用于对接 API 的 http(s) 链接。
@@ -280,7 +282,7 @@ class Bilibili(Star):
                                 logger.debug(f"[ImageEcho] Collected replied image URL: {url}")
         return urls
 
-    # ---------- 新增命令：回显图片 ----------
+    # ---------- 入口：图片回显命令 ----------
     @filter.command("回显图片")
     async def echo_images(self, event: AstrMessageEvent):
         """
@@ -291,7 +293,7 @@ class Bilibili(Star):
         except Exception:
             pass
 
-        logger.info(f"收到 /回显图片 命令，尝试获取图片...")
+        logger.info(f"[ImageEcho] 收到 /回显图片 命令，尝试获取图片...")
 
         image_urls = await self._collect_image_urls_from_event(event)
 
@@ -367,8 +369,8 @@ class Bilibili(Star):
 
             # 1) 尝试官方组件方式发送视频
             try:
-                from astrbot.api.message_components import Video
-
+                # 确保 Video 组件被导入
+                # from astrbot.api.message_components import Video # 已经统一导入 astrbot.api.all
                 video_comp = Video.fromURL(url=video_url)
 
                 if hasattr(event, "chain_result"):
