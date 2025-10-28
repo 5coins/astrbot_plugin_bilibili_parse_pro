@@ -3,16 +3,12 @@
 
 import re
 import aiohttp
-import asyncio # New: for potential async operations within image handling
-from pathlib import Path # New: for local file paths if needed
-import base64 # New: for base64 image handling if needed
 
-from astrbot.api import logger, sp # sp for global config, especially for callback_api_base
-from astrbot.api.event import AstrMessageEvent
+from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, filter  # 新增：filter 用于命令装饰器
 from astrbot.api.event.filter import EventMessageType, event_message_type
 from astrbot.api.star import Context, Star, register
-from astrbot.api.all import Image, Plain, Reply, Video # New: Image, Plain, Reply for image echo
-
+from astrbot.api.all import Image, Plain, Reply  # 新增：图片与文本组件
 
 # 统一匹配：普通视频页 + b23 短链 + bili2233 兜底
 # 例： https://www.bilibili.com/video/BV17x411w7KC
@@ -33,20 +29,15 @@ CARD_ESCAPED_LINK_PATTERN = (
 BV_OR_AV_ID_PATTERN = r"(BV[0-9A-Za-z]{10}|av\d{5,})"
 
 
-@register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（含b23短链兜底，支持卡片）", "1.3.1")
+@register("bilibili_parse", "功德无量", "B站视频解析并直接发送视频（含b23短链兜底，支持卡片）+ 图片回显", "1.4.0")
 class Bilibili(Star):
     """
     Bilibili Star: Parses Bilibili video links (including short links and card messages)
-    and sends the video directly.
-    Also includes an image echo command for demonstration purposes.
+    and sends the video directly. Also supports echoing images found in the message via /回显图片.
     """
 
     def __init__(self, context: Context):
         super().__init__(context)
-        # For image echo functionality: callback_api_base is crucial for converting local files to URLs
-        self.callback_api_base = context.get_config().get("callback_api_base") or ""
-        logger.info(f"Bilibili plugin initialized. callback_api_base for image handling: {self.callback_api_base}")
-
 
     # ---------- HTTP 工具 ----------
     async def _http_get_json(self, url: str):
@@ -207,25 +198,22 @@ class Bilibili(Star):
             "comment": item.get("comment", ""),
         }
 
-    # ---------- 图片回显功能辅助方法 ----------
+    # ---------- 图片工具：尽量把组件转为 HTTP 可访问 URL ----------
     async def _component_to_http_url(self, comp) -> str | None:
         """
-        尽量把任意图片组件转换为可用于对接 API 的 http(s) 链接。
         优先使用 convert_to_web_link；若缺失，则回退到属性 url/file；
-        如果仅有本地 path，可尝试转为回调直链。
+        如果仅有本地 path，可尝试转为回调直链（依赖平台的回调能力）。
         """
         # 1) 新版 Image 可能有 convert_to_web_link
         try:
             fn = getattr(comp, "convert_to_web_link", None)
             if callable(fn):
-                # convert_to_web_link 需要 bot 配置中提供 callback_api_base
-                # 否则对于本地文件会失败
                 url = await fn()
                 if url:
-                    logger.debug(f"[ImageEcho] Converted to web link: {url}")
+                    logger.debug(f"[image_echo] convert_to_web_link -> {url}")
                     return url
         except Exception as e:
-            logger.debug(f"[ImageEcho] convert_to_web_link 失败，继续回退: {e}")
+            logger.debug(f"[image_echo] convert_to_web_link 失败，继续回退: {e}")
 
         # 2) 旧组件字段回退: url / file
         for attr in ("url", "file"):
@@ -234,29 +222,30 @@ class Bilibili(Star):
             except Exception:
                 val = None
             if isinstance(val, str) and val.startswith("http"):
-                logger.debug(f"[ImageEcho] Found http(s) URL in attribute '{attr}': {val}")
+                logger.debug(f"[image_echo] 使用属性 {attr}: {val}")
                 return val
 
         # 3) 本地路径回退（需要转直链）
         try:
             path_val = getattr(comp, "path", None)
             if isinstance(path_val, str) and path_val:
-                logger.debug(f"[ImageEcho] Found local path: {path_val}")
-                # 尝试再次通过 Image.fromFileSystem 构造并转换
+                logger.debug(f"[image_echo] 发现本地路径: {path_val}")
+                # 再构造一个 Image 尝试转直链
                 img_comp = Image.fromFileSystem(path_val)
                 try:
                     url = await img_comp.convert_to_web_link()
                     if url:
-                        logger.debug(f"[ImageEcho] Converted local path to web link: {url}")
+                        logger.debug(f"[image_echo] 本地路径转直链成功: {url}")
                         return url
                 except Exception as e:
-                    logger.warning(f"[ImageEcho] 本地路径 {path_val} 转换为 web link 失败: {e}")
+                    logger.warning(f"[image_echo] 本地路径转直链失败: {e}")
         except Exception as e:
-            logger.debug(f"[ImageEcho] 处理本地路径失败: {e}")
+            logger.debug(f"[image_echo] 处理本地路径失败: {e}")
 
-        logger.debug("[ImageEcho] 未能将组件转换为 HTTP URL")
+        logger.debug("[image_echo] 未能将组件转换为 HTTP URL")
         return None
 
+    # ---------- 图片工具：从事件中收集所有图片 URL（含回复链） ----------
     async def _collect_image_urls_from_event(self, event: AstrMessageEvent) -> list[str]:
         """
         从消息事件中收集所有图片组件的 HTTP URL。
@@ -270,45 +259,43 @@ class Bilibili(Star):
                     url = await self._component_to_http_url(comp)
                     if url:
                         urls.append(url)
-                        logger.debug(f"[ImageEcho] Collected direct image URL: {url}")
+                        logger.debug(f"[image_echo] 收集直发图片: {url}")
                 # 检查是否是回复消息，并尝试从回复链中获取图片
                 elif isinstance(comp, Reply) and getattr(comp, 'chain', None):
-                    logger.debug("[ImageEcho] Found Reply component, checking chain...")
+                    logger.debug("[image_echo] 发现 Reply 组件，检查 chain...")
                     for r_comp in comp.chain:
                         if isinstance(r_comp, Image):
                             url = await self._component_to_http_url(r_comp)
                             if url:
                                 urls.append(url)
-                                logger.debug(f"[ImageEcho] Collected replied image URL: {url}")
+                                logger.debug(f"[image_echo] 收集引用图片: {url}")
         return urls
 
-    # ---------- 入口：图片回显命令 ----------
+    # ---------- 新增指令：回显图片 ----------
     @filter.command("回显图片")
     async def echo_images(self, event: AstrMessageEvent):
         """
         接收图片（直接发送或引用），并将其原样回显。
         """
         try:
-            event.call_llm = False # 防止 LLM 介入
+            event.call_llm = False  # 防止 LLM 介入
         except Exception:
             pass
 
-        logger.info(f"[ImageEcho] 收到 /回显图片 命令，尝试获取图片...")
-
+        logger.info("[image_echo] 收到 /回显图片 命令，尝试获取图片...")
         image_urls = await self._collect_image_urls_from_event(event)
 
         if not image_urls:
-            logger.info("[ImageEcho] 未检测到图片。")
+            logger.info("[image_echo] 未检测到图片。")
             yield event.plain_result("未检测到图片，请直接发送图片或引用包含图片的回复。")
             return
 
-        response_components = [Plain(f"检测到 {len(image_urls)} 张图片，正在回显：")]
+        response_components = [Plain(f"检测到 {len(image_urls)} 张图片，原样回显：")]
         for url in image_urls:
-            logger.info(f"[ImageEcho] 回显图片 URL: {url}")
+            logger.info(f"[image_echo] 回显图片 URL: {url}")
             response_components.append(Image.fromURL(url))
-        
-        yield event.chain_result(response_components)
 
+        yield event.chain_result(response_components)
 
     # ---------- 入口：匹配 B 站视频链接（含卡片） ----------
     # 重要：这里不用 @filter.regex，以便卡片消息也能进入，再在函数内做匹配与早退
@@ -363,14 +350,12 @@ class Bilibili(Star):
             cover = info["pic"]
 
             # 说明文本（有的平台不显示 caption，所以单独补发一条）
-            caption = (
-                f"🎬 标题: {title}\n"
-            )
+            caption = f"🎬 标题: {title}\n"
 
             # 1) 尝试官方组件方式发送视频
             try:
-                # 确保 Video 组件被导入
-                # from astrbot.api.message_components import Video # 已经统一导入 astrbot.api.all
+                from astrbot.api.message_components import Video
+
                 video_comp = Video.fromURL(url=video_url)
 
                 if hasattr(event, "chain_result"):
@@ -405,4 +390,3 @@ class Bilibili(Star):
         except Exception as e:
             logger.error(f"[bilibili_parse] 处理B站视频解析时发生未预期错误: {e}", exc_info=True)
             yield event.plain_result("解析B站视频时发生内部错误。")
-
